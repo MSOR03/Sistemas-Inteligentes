@@ -1,0 +1,9 @@
+#Ignore all files in the Info directory
+/Info/**
+
+#Ignore presentation files
+/Presentation/**
+
+#Ignore task files
+task.txt
+

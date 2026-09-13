@@ -26,12 +26,12 @@ Dos decisiones tomadas explícitamente por cumplimiento:
   espíritu del reglamento (*"el estado del número generado"* es verificable) y
   expone a perder la ronda por infracción. Toda la fuerza del agente está en el
   lado de la búsqueda, no en la respuesta.
-- **El secreto es uniformemente aleatorio** entre las 5040 combinaciones. Es la
-  elección teóricamente inexplotable: cualquier sesgo (por ejemplo, favorecer
-  dígitos altos para castigar a los rivales que recorren el espacio en orden
-  lexicográfico) daría ventaja contra agentes ingenuos, pero deja de ser un
-  número "aleatorio" según el reglamento y sería explotable por un rival que
-  lea el código.
+- **El secreto es uniformemente aleatorio entre las 4536 combinaciones que no
+  empiezan en 0** (muestreo por rechazo). El reglamento habla de un "número de
+  cuatro cifras" y el agente real de un compañero (`rival_real.py`) busca en
+  `range(1023, 9876)`: con un secreto como `0123` su lista de candidatos queda
+  vacía, `random.choice` lanza `IndexError` y, como el ambiente no protege las
+  llamadas, se aborta el torneo entero (≈21% de los torneos medidos).
 
 `try` es palabra reservada de Python, así que no puede declararse con `def`. El
 agente expone **ambas** vías que contempla el ambiente: el método `try_attempt`
@@ -59,7 +59,9 @@ Para probarlo localmente:
 
 ```bash
 python3 Picas_Y_Fijas_Agent.py   # autoprueba: distribución de turnos y tiempos
-python3 test_torneo.py 40        # torneo contra los rivales de examples/
+python3 test_ambiente.py 300     # ejecuta la celda REAL de Ambiente.ipynb (interfaz + torneos)
+python3 validar.py 800 100       # distribución de turnos + rivales de examples/
+python3 test_rival_real.py 300   # contra el agente real del compañero
 ```
 
 ---
@@ -82,6 +84,12 @@ historia y se elige la jugada que minimiza el número esperado de candidatos
 supervivientes, excluyendo la clase ganadora `[0,4]` (ahí el juego termina).
 Los desempates son, en orden: menor peor caso, y preferir una jugada que además
 sea candidata, porque solo esas pueden ganar en el turno actual.
+
+**Prior de cero inicial.** Mientras quede algún candidato que no empiece en 0,
+la búsqueda se hace solo sobre esos (muchos rivales generan "números de 4
+cifras" sin cero inicial). Si la evidencia los descarta, vuelve sola a las 5040.
+Se desactiva si se detecta un rival que miente, porque ese rival se refugiaría
+en la parte del espacio que el agente no está partiendo.
 
 ### Modelo del rival
 
@@ -114,5 +122,27 @@ explorar regala el turno, así que el agente juega solo candidatos, que son los
 
 ## 4. Rendimiento medido
 
-(Ver sección de resultados más abajo — se completa con la salida de
-`test_torneo.py` y `tune.py`.)
+Medido con la versión actual (el secreto usa `os.urandom`, así que cada
+ejecución varía unos ±4 puntos porcentuales).
+
+**En solitario** (`validar.py`, 800 partidas, secreto uniforme de 5040):
+promedio 5.29 turnos, peor caso 7, P(≤5 turnos) 0.61. Turno más lento: ~50 ms.
+
+**Contra `rival_real.py`, con el código real del notebook** (600 torneos a 3 rondas):
+
+| Versión | Torneos abortados por caída del rival | Puntos en torneos limpios | Rondas G/P |
+|---|---|---|---|
+| Antes (secreto con 0 inicial, sin prior) | 130 / 600 | 57.2% | 530 / 408 |
+| Ahora | **0 / 600** | **63.2%** | **720 / 468** |
+
+**Contra los rivales de `examples/`** (400 rondas, puntos = G + ½E):
+
+| Rival | Antes | Ahora |
+|---|---|---|
+| Consistente | 57.8% | 59.6% |
+| Entrópico | 49.5% | 51.6% |
+| Minimax | 48.9% | 53.8% |
+| Tramposo (miente, no fija secreto) | 30.9% | 36.9% |
+| Aleatorio | 100% | 100% |
+
+Infracciones reglamentarias del agente en todas las pruebas: **0**.

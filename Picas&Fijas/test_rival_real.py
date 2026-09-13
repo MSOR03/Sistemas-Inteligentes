@@ -153,7 +153,7 @@ def main():
         print("  promedio %.3f turnos   peor %d   distribucion %s"
               % (sum(turnos) / len(turnos), max(turnos),
                  {t: cuenta[t] for t in sorted(cuenta)}))
-        print("  (mi agente: 5.20 turnos de promedio, peor caso 7)")
+        print("  (mi agente: ~5.3 turnos de promedio, peor caso 7; ver validar.py)")
         print()
 
         print("=" * 78)

@@ -7,3 +7,9 @@
 #Ignore task files
 task.txt
 
+# Ignore Python cache files
+
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd

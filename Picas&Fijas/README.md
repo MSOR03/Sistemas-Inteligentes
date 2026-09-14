@@ -55,7 +55,7 @@ ningún método puede lanzar excepción.
    no en la ruta de Drive.** Antes de la celda del ambiente ejecuta
    `import os; os.chdir(ruta_carpeta)`, o copia el `.py` a `/content`.
 3. Ejecuta la celda del ambiente, elige
-   `AgentePicasFijas (Picas_Y_Fijas_Agent.py)` y pulsa **⚖️ Torneo Masivo**.
+   `AgenteJJ&S (Picas_Y_Fijas_Agent.py)` y pulsa **⚖️ Torneo Masivo**.
 
 Pruebas locales:
 

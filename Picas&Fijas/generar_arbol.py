@@ -301,7 +301,7 @@ def main():
     pesos = construir_pesos(referencia, args.peso_rivales, args.peso_carrera)
     _configurar(ks, pesos)
 
-    apertura = A.INDICE[tuple(A.AgentePicasFijas.PRIMER_INTENTO)]
+    apertura = A.INDICE[tuple(getattr(A, A.NOMBRE_AGENTE).PRIMER_INTENTO)]
     hijos = A._particion(apertura, A.MASCARA_TOTAL)
     tareas = []
     for (picas, fijas), x in hijos:

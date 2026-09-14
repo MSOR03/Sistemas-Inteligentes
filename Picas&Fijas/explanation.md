@@ -132,7 +132,7 @@ Created by the last line, `UI = TorneoPicasFijasUI()`. Its methods:
 | **No turn limit** | The round only ends when someone gets `[0, 4]`. An agent that never solves plays forever. |
 | **Exceptions are not caught** | An agent that raises an error stops the whole tournament. `rival_real.py` does this whenever the secret starts with 0 (see 3.3). |
 | **Invalid guess → feedback `[0, 0]`** | The offending agent receives a false "no digit matches". Your agent never sends an invalid guess. |
-| **Every class with `start` + `try_attempt` is listed** | Class aliases in a module show up as duplicate dropdown entries, so your agent exports only `AgentePicasFijas`. |
+| **Every class with `start` + `try_attempt` is listed** | Class aliases in a module show up as duplicate dropdown entries, so your agent exports only `AgenteJJ&S`. |
 | **The seed controls the global `random`** | Secrets repeat for a given seed. Your agent never uses the global `random`, so it cannot change the judge's sequence. |
 | **The markdown's inheritance check is not in the code** | The scanner only checks `hasattr`. Your agent inherits from `interfazAgente` anyway (section 6.5). |
 | **"Average turns" only counts won or tied rounds** | Use win counts to compare agents, not that average. |
@@ -178,7 +178,7 @@ The rules require "4 dígitos enteros únicos entre 0 y 9", and the judge draws 
 | Bitset algebra | `_celdas`, `_celdas_fijas`, `_celdas_comunes`, `_particion`, `_estadisticas`, `_refinar` |
 | Helpers | `_evaluar`, `_indices`, `_normalizar_numero`, `_normalizar_respuesta` |
 | Decision tree | `LETRAS`, the generated `ARBOL` block, `_letra`, `_cargar_arbol` |
-| Class `AgentePicasFijas` | `start`, `try_attempt`, `feedBack`, `receive_feedback`, `discover`, `_elegir_jugada`, `_recuperar` |
+| Class `AgenteJJ&S` | `start`, `try_attempt`, `feedBack`, `receive_feedback`, `discover`, `_elegir_jugada`, `_recuperar` |
 | Interface glue | the `try` alias, `_buscar_interfaz`, `_registrar_en_interfaz`, `_heredar_de_interfaz` |
 | Self-test | `python3 Picas_Y_Fijas_Agent.py` plays all 5040 secrets |
 
@@ -379,10 +379,10 @@ The **path** is the string of letters received so far. The block written by `gen
 **How real inheritance works.** A notebook runs its cells in the `__main__` module. When the scanner imports your file, `_buscar_interfaz` finds `interfazAgente` there, since cell 6 ran first, and creates:
 
 ```python
-AgentePicasFijas = ABCMeta("AgentePicasFijas", (OriginalClass, interfazAgente), {...})
+AgenteJJ&S = ABCMeta("AgenteJJ&S", (OriginalClass, interfazAgente), {...})
 ```
 
-- The MRO is `AgentePicasFijas → OriginalClass → interfazAgente → ABC → object`, so your methods override the abstract ones.
+- The MRO is `AgenteJJ&S → OriginalClass → interfazAgente → ABC → object`, so your methods override the abstract ones.
 - If `__abstractmethods__` is empty, this class is exported.
 - If the interface demanded a method the agent lacked, the plain class would be kept and registered with `interfazAgente.register(...)`. `isinstance` is then still True, and no `TypeError` is raised.
 
@@ -424,7 +424,7 @@ AgentePicasFijas = ABCMeta("AgentePicasFijas", (OriginalClass, interfazAgente), 
    - add a cell after cell 9 with `import os; os.chdir(ruta_carpeta)`, then run cell 11; or
    - copy the file into `/content`.
 2. **Run cell 6, then cell 11.** If cell 6 runs first, the agent inherits from `interfazAgente`.
-3. **Pick `AgentePicasFijas (Picas_Y_Fijas_Agent.py)`** as Agente A or B, choose the number of rounds, and press **⚖️ Torneo Masivo**. Use **🔄 Cargar .py** if you add files after the interface was built.
+3. **Pick `AgenteJJ&S (Picas_Y_Fijas_Agent.py)`** as Agente A or B, choose the number of rounds, and press **⚖️ Torneo Masivo**. Use **🔄 Cargar .py** if you add files after the interface was built.
 
 ### Locally
 

@@ -35,7 +35,7 @@ NOTEBOOK = os.path.join(AQUI, "Ambientes", "Ambiente_Definitivo.ipynb")
 
 # Archivos que se ponen en la "carpeta de Drive" simulada.
 ARCHIVOS = ["Picas_Y_Fijas_Agent.py", "rival_real.py", "rivales_nuevo_ambiente.py"]
-MI_AGENTE = "AgentePicasFijas (Picas_Y_Fijas_Agent.py)"
+MI_AGENTE = "AgenteJJ&S (Picas_Y_Fijas_Agent.py)"
 RIVALES = [
     "AgenteEstrategico",                                  # incluido en el notebook
     "AgenteAleatorio",                                    # incluido en el notebook

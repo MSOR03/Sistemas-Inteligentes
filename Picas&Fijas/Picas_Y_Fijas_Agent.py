@@ -259,7 +259,13 @@ ARBOL = _cargar_arbol(ARBOL_TEXTO)
 #  Agente
 # =============================================================================
 
-class AgentePicasFijas:
+# Nombre con el que aparece el agente en el desplegable del ambiente. El
+# ambiente usa la clave del modulo, y "&" no es valido en un identificador de
+# Python, asi que la clase se publica al final con globals()[NOMBRE_AGENTE].
+NOMBRE_AGENTE = "AgenteJJ&S"
+
+
+class _AgenteJJyS:
     """Agente para Picas y Fijas: arbol optimizado + busqueda de respaldo."""
 
     # Apertura. Todas las aperturas son equivalentes (renombrar digitos
@@ -414,7 +420,7 @@ class AgentePicasFijas:
         return MASCARA_TOTAL
 
     def __repr__(self):
-        return "<AgentePicasFijas candidatos=%d ruta=%r>" % (_popcount(self._mascara), self._ruta)
+        return "<AgenteJJ&S candidatos=%d ruta=%r>" % (_popcount(self._mascara), self._ruta)
 
 
 def _alias_try(self):
@@ -423,7 +429,7 @@ def _alias_try(self):
     return self.try_attempt()
 
 
-setattr(AgentePicasFijas, "try", _alias_try)
+setattr(_AgenteJJyS, "try", _alias_try)
 
 
 # =============================================================================
@@ -473,10 +479,13 @@ def _heredar_de_interfaz(clase):
     return clase
 
 
-AgentePicasFijas = _heredar_de_interfaz(AgentePicasFijas)
+_AgenteJJyS.__name__ = _AgenteJJyS.__qualname__ = NOMBRE_AGENTE
+globals()[NOMBRE_AGENTE] = _heredar_de_interfaz(_AgenteJJyS)
 
-# Nota: no se exportan alias de la clase. El ambiente nuevo lista en su
-# desplegable CADA clase del modulo, y los alias aparecerian repetidos.
+# Nota: no se exportan alias de la clase (por eso se borra _AgenteJJyS). El
+# ambiente nuevo lista en su desplegable CADA clase del modulo, y los alias
+# aparecerian repetidos.
+del _AgenteJJyS
 
 
 # =============================================================================
@@ -487,10 +496,11 @@ if __name__ == "__main__":
     import time
     from collections import Counter
 
+    Agente = globals()[NOMBRE_AGENTE]
     inicio = time.time()
     turnos = []
     for secreto in CODIGOS:
-        agente = AgentePicasFijas()
+        agente = Agente()
         agente.start()
         for turno in range(1, 30):
             intento = agente.try_attempt()

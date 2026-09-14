@@ -1,148 +1,88 @@
 # Agente para la Competencia de Picas y Fijas
 
-Archivo a entregar: **`Picas_Y_Fijas_Agent.py`** (un solo archivo, sin dependencias
-externas: solo la librería estándar de Python, no requiere `numpy`).
+Archivo a entregar: **`Picas_Y_Fijas_Agent.py`** (un solo archivo, solo librería
+estándar de Python).
+
+Ambiente oficial: **`Ambientes/Ambiente_Definitivo.ipynb`** (juez central).
+La explicación completa del ambiente y del agente está en
+[`explanation.md`](explanation.md).
 
 ---
 
-## 1. Cumplimiento del reglamento
+## Archivos
 
-El ambiente valida estructura en cuatro puntos. El agente los cumple todos de
-forma explícita:
-
-| Regla del ambiente | Qué exige | Qué devuelve el agente |
+| Archivo | Para qué sirve | ¿Se entrega? |
 |---|---|---|
-| `Ambiente.setup` | Heredar de `interfazAgente` | Implementa los 4 métodos y, si el ambiente definió la interfaz como ABC, se registra como subclase virtual (`issubclass` e `isinstance` dan `True`) |
-| `Ambiente.initRound` → `start()` | Secreto de 4 dígitos **enteros únicos** 0–9 | `self.secret` es una `list` de 4 `int` únicos, aceptada por `es_intento_valido` |
-| `Ambiente.getAttempts` → `try` | `list` de 4 `int` únicos 0–9 | `[d0, d1, d2, d3]`, siempre válida, nunca repite un intento |
-| `Ambiente.evaluateAttempts` → `discover` | `list` de 2 `int` `[P, F]` con `P + F ≤ 4` | Evaluación **honesta** contra el secreto declarado |
-| `Ambiente.dispatchFeedback` → `feedBack` | Recibe `[P, F]` | Actualiza la base de conocimiento |
-
-Dos decisiones tomadas explícitamente por cumplimiento:
-
-- **`discover` nunca miente.** La respuesta es siempre la evaluación real del
-  secreto generado en `start()`. Existen agentes de ejemplo que responden sin
-  fijar secreto para alargar la partida del rival; esa táctica contradice el
-  espíritu del reglamento (*"el estado del número generado"* es verificable) y
-  expone a perder la ronda por infracción. Toda la fuerza del agente está en el
-  lado de la búsqueda, no en la respuesta.
-- **El secreto es uniformemente aleatorio entre las 4536 combinaciones que no
-  empiezan en 0** (muestreo por rechazo). El reglamento habla de un "número de
-  cuatro cifras" y el agente real de un compañero (`rival_real.py`) busca en
-  `range(1023, 9876)`: con un secreto como `0123` su lista de candidatos queda
-  vacía, `random.choice` lanza `IndexError` y, como el ambiente no protege las
-  llamadas, se aborta el torneo entero (≈21% de los torneos medidos).
-
-`try` es palabra reservada de Python, así que no puede declararse con `def`. El
-agente expone **ambas** vías que contempla el ambiente: el método `try_attempt`
-y el atributo literal `try` (instalado con `setattr`), de modo que
-`invocar_try` funciona por cualquiera de sus dos ramas.
+| `Picas_Y_Fijas_Agent.py` | El agente | **Sí** |
+| `Ambientes/Ambiente_Definitivo.ipynb` | Ambiente del torneo (sin modificar) | No |
+| `explanation.md` | Cómo funcionan el ambiente y el agente | No |
+| `generar_arbol.py` | Recalcula el árbol de decisión y lo escribe dentro del agente | No |
+| `test_nuevo_ambiente.py` | Ejecuta el código real del notebook contra 6 rivales | No |
+| `rivales_nuevo_ambiente.py` | Agentes de `examples/` adaptados a la interfaz nueva | No |
+| `rival_real.py` | Agente real de un compañero (rival de prueba) | No |
+| `examples/` | Agentes y ambiente de ejemplo originales | No |
 
 ---
 
-## 2. Cómo se usa
+## Cómo es el juego ahora
 
-Sube `Picas_Y_Fijas_Agent.py` a la carpeta de Drive de la competencia. En el
-notebook del ambiente:
+- En cada ronda el **juez** genera un secreto (`random.sample(range(10), 4)`,
+  el **0 inicial es válido**).
+- Los dos agentes adivinan **el mismo secreto**, cada uno por su lado, y el
+  juez les da `[picas, fijas]`.
+- Gana quien llega a `[0, 4]` en menos turnos; el mismo turno es empate.
+- Es una **carrera de velocidad**: ganar más rondas = resolver en menos turnos.
 
-```python
-from Picas_Y_Fijas_Agent import AgentePicasFijas
+## Interfaz que cumple el agente
 
-agente1 = AgentePicasFijas()
-```
+| Ambiente | Agente |
+|---|---|
+| `interfazAgente.start()` | Resetea lo aprendido (el ambiente crea un agente nuevo por ronda) |
+| `interfazAgente.try_attempt()` | `list` de 4 `int` únicos 0–9, nunca repetida |
+| `interfazAgente.feedBack([P, F])` | Filtra los candidatos |
+| `AdaptadorUniversal.receive_feedback(P, F)` | Alias de `feedBack` |
 
-El módulo además exporta los alias `Agente`, `AgenteClase1`, `AgenteClase2`,
-`AgentePicasYFijas` y `TuAgente`, todos apuntando a la misma clase, para que
-cualquier forma de importación del ambiente funcione sin editar el archivo.
+El agente **hereda de verdad** de `interfazAgente` si la celda de la interfaz se
+ejecutó antes, exporta **una sola clase** (una sola entrada en el desplegable) y
+ningún método puede lanzar excepción.
 
-Para probarlo localmente:
+---
+
+## Cómo se usa en el notebook
+
+1. Ejecuta la celda de `interfazAgente` y la de Drive.
+2. **El escáner busca archivos en la carpeta de trabajo (`os.listdir('.')`),
+   no en la ruta de Drive.** Antes de la celda del ambiente ejecuta
+   `import os; os.chdir(ruta_carpeta)`, o copia el `.py` a `/content`.
+3. Ejecuta la celda del ambiente, elige
+   `AgentePicasFijas (Picas_Y_Fijas_Agent.py)` y pulsa **⚖️ Torneo Masivo**.
+
+Pruebas locales:
 
 ```bash
-python3 Picas_Y_Fijas_Agent.py   # autoprueba: distribución de turnos y tiempos
-python3 test_ambiente.py 300     # ejecuta la celda REAL de Ambiente.ipynb (interfaz + torneos)
-python3 validar.py 800 100       # distribución de turnos + rivales de examples/
-python3 test_rival_real.py 300   # contra el agente real del compañero
+python3 Picas_Y_Fijas_Agent.py        # juega los 5040 secretos posibles
+python3 test_nuevo_ambiente.py 1000   # código real del notebook vs 6 rivales
+python3 generar_arbol.py              # recalcula el árbol (tarda minutos)
 ```
 
 ---
 
-## 3. Cómo juega
+## Estrategia (resumen)
 
-### Representación
+1. **Apertura fija `0123`** (todas las aperturas son equivalentes).
+2. **Árbol de decisión precalculado**: para cada secuencia de respuestas guarda
+   la jugada que minimiza el total de turnos sobre los 5040 secretos. Lo calcula
+   `generar_arbol.py` con búsqueda exacta sobre las mejores jugadas de cada
+   posición, memoria por bitset y poda por cota inferior.
+3. **1–2 candidatos**: juega un candidato.
+4. **Respaldo en línea** (solo si la partida sale del árbol): la jugada que
+   minimiza el número esperado de candidatos restantes.
 
-El espacio del juego son las 5040 permutaciones de 4 dígitos distintos. Un
-conjunto de candidatos se guarda como un **entero de 5040 bits**, y las
-particiones por respuesta se calculan con operaciones de bits sobre máscaras
-precalculadas por `(posición, dígito)` y por `dígito presente`. Eso es lo que
-permite evaluar **las 5040 jugadas posibles en cada turno** —no solo las
-candidatas— en milisegundos y en Python puro.
-
-### Elección de jugada
-
-Cada turno se filtra el conjunto de candidatos consistentes con toda la
-historia y se elige la jugada que minimiza el número esperado de candidatos
-supervivientes, excluyendo la clase ganadora `[0,4]` (ahí el juego termina).
-Los desempates son, en orden: menor peor caso, y preferir una jugada que además
-sea candidata, porque solo esas pueden ganar en el turno actual.
-
-**Prior de cero inicial.** Mientras quede algún candidato que no empiece en 0,
-la búsqueda se hace solo sobre esos (muchos rivales generan "números de 4
-cifras" sin cero inicial). Si la evidencia los descarta, vuelve sola a las 5040.
-Se desactiva si se detecta un rival que miente, porque ese rival se refugiaría
-en la parte del espacio que el agente no está partiendo.
-
-### Modelo del rival
-
-Cada respuesta honesta que el agente da es información que el rival recibe.
-Replicando ese mismo filtrado, el agente sabe en todo momento **cuánta
-incertidumbre le queda al rival sobre el secreto propio**. Con eso ajusta el
-riesgo: si el rival está a punto de resolver y no está peor posicionado,
-explorar regala el turno, así que el agente juega solo candidatos, que son los
-únicos con probabilidad de ganar ya. Un empate vale más que una derrota.
-
-### Defensas
-
-- **Rival adversarial.** Si el rival responde sistemáticamente enviando al
-  agente a la clase de respuesta más grande —firma de un agente que no fija
-  secreto y responde para maximizar la incertidumbre— el criterio cambia a
-  minimax puro, que es la respuesta óptima contra ese comportamiento.
-- **Respuestas contradictorias.** Si el conjunto de candidatos queda vacío
-  porque el rival respondió de forma inconsistente, se descartan las
-  restricciones más antiguas hasta recuperar un conjunto viable, en lugar de
-  reiniciar la búsqueda desde cero.
-- **Robustez.** Ningún método público puede lanzar una excepción: todos tienen
-  respaldo seguro. `discover` acepta el intento como lista, tupla, cadena o
-  entero. Nunca se repite un intento ya jugado, así que el agente no puede
-  entrar en un bucle aunque el ambiente omita la retroalimentación.
-- **Secreto impredecible.** Se genera con un generador propio sembrado desde
-  `os.urandom`, de modo que otro agente no puede predecirlo manipulando
-  `random.seed()` en el proceso compartido.
+Los candidatos se guardan como un entero de 5040 bits; filtrar por una
+respuesta son unas pocas operaciones `&`.
 
 ---
 
-## 4. Rendimiento medido
+## Rendimiento medido
 
-Medido con la versión actual (el secreto usa `os.urandom`, así que cada
-ejecución varía unos ±4 puntos porcentuales).
-
-**En solitario** (`validar.py`, 800 partidas, secreto uniforme de 5040):
-promedio 5.29 turnos, peor caso 7, P(≤5 turnos) 0.61. Turno más lento: ~50 ms.
-
-**Contra `rival_real.py`, con el código real del notebook** (600 torneos a 3 rondas):
-
-| Versión | Torneos abortados por caída del rival | Puntos en torneos limpios | Rondas G/P |
-|---|---|---|---|
-| Antes (secreto con 0 inicial, sin prior) | 130 / 600 | 57.2% | 530 / 408 |
-| Ahora | **0 / 600** | **63.2%** | **720 / 468** |
-
-**Contra los rivales de `examples/`** (400 rondas, puntos = G + ½E):
-
-| Rival | Antes | Ahora |
-|---|---|---|
-| Consistente | 57.8% | 59.6% |
-| Entrópico | 49.5% | 51.6% |
-| Minimax | 48.9% | 53.8% |
-| Tramposo (miente, no fija secreto) | 30.9% | 36.9% |
-| Aleatorio | 100% | 100% |
-
-Infracciones reglamentarias del agente en todas las pruebas: **0**.
+⟦RESULTADOS⟧

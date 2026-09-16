@@ -187,7 +187,7 @@ Two helper files go with it (you **don't** upload them):
 - `generar_arbol.py` computes the decision tree and writes it into the agent file.
 - `test_nuevo_ambiente.py` runs the real notebook code against the rivals.
 
-### 4.1 The agent's memory (reset by `start()`)
+### 4.1 The agent's memory (reset on `[-1, -1]`, and by `__init__`)
 
 | Attribute | Meaning |
 |---|---|
@@ -195,22 +195,32 @@ Two helper files go with it (you **don't** upload them):
 | `_ruta` | The answers so far, one letter each (`None` = off the tree) |
 | `_historia` | `(guess_index, (picas, fijas))` for every answer, used for recovery |
 | `_ultima_jugada` | The guess waiting for its answer |
-| `_jugadas_hechas` | Guesses already made (never repeated) |
-| `resuelto` | True after `[0, 4]` |
-| `secret` | A valid 4-digit secret. The new environment ignores it; it exists for the rules text and the old notebook. |
+| `jugadas_hechas` | Guesses already made (never repeated) |
+
+`resuelto` and `secret` used to live here too. Both were written and never
+read — the central judge generates the secret, so the agent's own was dead
+weight — and they are gone. The agent keeps **nothing between rounds**: the
+environment builds a fresh instance each round, and `[-1, -1]` resets it
+anyway, as the rules require.
 
 ### 4.2 The methods, in plain words
 
-- **`__init__()`**: no arguments. It creates a private random generator seeded from `os.urandom`, then calls `start()`. It takes about 0.02 ms, which matters because the environment creates a new agent every round.
-- **`start()`**: sets `secret`, empties the memory, and sets `_mascara` to all 5040 codes and `_ruta` to `""`.
-- **`try_attempt()`**: asks `_elegir_jugada()` for a code index, records it, and returns it as `[d0, d1, d2, d3]`. If anything went wrong inside, it falls back to the first candidate not yet played, so it always returns a valid guess.
-- **`feedBack([picas, fijas])`**:
-  1. checks the answer is possible (2 ints, P + F ≤ 4);
-  2. on `[0, 4]`, marks the round solved and stops;
-  3. otherwise appends to `_historia`, keeps only the codes consistent with the answer (`_refinar`), and adds the answer's letter to `_ruta`;
-  4. if no code is left (impossible with an honest judge), runs `_recuperar()` and leaves the tree.
-- **`receive_feedback(picas, fijas)`**: the adapter's preferred name; it calls `feedBack([picas, fijas])`.
-- **`discover(numeroLista)`**: kept for the old notebook. It scores a guess against `self.secret`, and the new environment never calls it.
+The class has **one** interface method. Everything else is module-level
+functions taking the agent as `estado`.
+
+- **`__init__()`**: no arguments, just resets the memory.
+- **`compute([picas, fijas])`**: the whole turn, and the only thing the
+  environment calls. It reads the answer to the previous guess, then returns
+  this turn's guess. It never raises: on any internal error it falls back to
+  `_jugada_de_emergencia`, which returns a valid unplayed code.
+  1. `_procesar_respuesta` — on `[-1, -1]` (or anything negative) it resets and
+     the round starts; otherwise it checks the answer is possible
+     (2 ints, P + F ≤ 4), and on `[0, 4]` the round is over.
+  2. Otherwise it appends to `historia`, keeps only the codes consistent with
+     the answer (`_refinar`), and adds the answer's letter to `ruta`.
+  3. If no code is left (impossible with an honest judge) it runs `_recuperar`
+     and leaves the tree.
+  4. `_elegir_jugada` then picks this turn's guess (see section 6).
 
 ---
 
@@ -266,8 +276,16 @@ POS[3][4]       g0=[4321 5678]  g1=[1567]  g2=[1289 2134]  g4=[1234]
   ```
 
   For example, after guess `1234` with answer `[2, 1]`, **216** of the 5040 codes remain.
-- **`_particion(guess, set)`** lists every non-empty answer group of a guess, leaving out the winning `[0, 4]`.
-- **`_estadisticas`** returns (sum of squared group sizes, largest group) for the backup search.
+- **`_barrido(candidates)`** scores **all 5040 guesses** in one pass, returning
+  for each one `(turn cost, sum of squares, largest group, number of groups)`
+  over its answer groups, leaving out the winning `[0, 4]`.
+
+  It works in a **compressed universe**: candidate number *i* becomes bit *i*,
+  so each mask is `len(candidates)` bits instead of 5040. That matters because
+  a 5040-bit Python integer occupies 629 bytes *always* — with 4 candidates
+  left or 5000 — which is why the scan never got cheaper as the game went on.
+  Same numbers, about twice as fast; it replaced the older
+  `_particion`/`_estadisticas` pair.
 
 Every first guess splits the 5040 codes the same way. For `0123`:
 
@@ -289,12 +307,54 @@ Every first guess splits the 5040 codes the same way. For `0123`:
 
 ```text
 (a) First turn            → the fixed opening 0123
-(b) Is _ruta in ARBOL?     → play the stored guess                    (≈ every turn)
+(b) Is _ruta in ARBOL?     → play the stored guess
 (c) 1 or 2 candidates      → play one of them
-(d) Otherwise (off-tree)   → live search over all 5040 guesses
+(d) Otherwise              → live search over all 5040 guesses
 ```
 
-With an honest judge, the tree covers every position with 3 or more candidates, so (d) never runs in this environment. It is there as insurance.
+**`ARBOL_TEXTO` is currently empty**, so (b) never fires and the agent plays
+entirely from the live search (d). The tree machinery stays in the file so a
+generated block can be pasted in whenever wanted — see 6.2 for what that is
+actually worth, which turns out to be very little.
+
+### 6.1b What the live search optimises
+
+For each of the 5040 guesses the agent computes the answer classes it would
+split the candidates into, and scores it by **how many turns it will cost**:
+
+```text
+score(g) = Σ  |S_c| · T(|S_c|)          over the answer classes S_c of g
+T(m)     = expected turns still needed when m candidates remain
+         = A + B·ln(m),  with T(1)=1 and T(2)=1.5 exact
+```
+
+`T` was measured by playing 500 rounds and recording how long it took to
+finish from each set size; `A = 1.1078`, `B = 0.6200` were then chosen by an
+**exhaustive sweep over all 5040 secrets** (16 combinations; every neighbour
+of that pair is worse).
+
+The previous version minimised `Σ |S_c|²`, i.e. the expected number of
+surviving **candidates**. That is the wrong scale: it treats a class of 40 as
+four times worse than one of 20, when in real turns it is only ~0.3 worse.
+Measured over all 5040 secrets, switching the scale gives **5.2688 → 5.2397**.
+
+> ⚠️ **`T` must be non-decreasing, and the code forces it.** For any split
+> `i + j = k`, `i·T(i) + j·T(j) ≤ k·T(k)` holds only while `T` is
+> non-decreasing — that inequality is what makes splitting always look at
+> least as good as not splitting. With `T(3) < T(2)` the agent has been
+> observed to sit on 3 candidates for 20+ turns without ever trying one of
+> them, losing the round outright.
+
+A safety net backs this up: guesses that produce a single answer class and are
+not themselves candidates are skipped (they teach nothing), and the running
+best starts out as a candidate, so the agent can never fail to answer.
+
+**Why not minimax.** Minimising the largest answer class instead is the
+textbook Mastermind move. Measured exhaustively it gives **5.3429** turns with
+worst case 7, against **5.2397** with worst case 8 for the turns-based score.
+It buys a better worst case at a real cost in average. And it is not even the
+best way to buy it: `A = 1.800, B = 0.350` reaches worst case 7 with **zero**
+8-turn secrets at an average of **5.2581**, beating minimax on both counts.
 
 ### 6.2 The decision tree: what it optimises
 
@@ -447,4 +507,38 @@ The rivals:
 
 ### Measured results
 
-⟦RESULTS⟧
+All 5040 secrets, exhaustive (the agent is deterministic given the secret, so
+this is the exact expected value, not a sample).
+
+| | turns | worst | distribution |
+|---|---|---|---|
+| **This agent** | **5.2397** | 8 | `{1:1, 2:7, 3:74, 4:611, 5:2457, 6:1789, 7:100, 8:1}` |
+| Previous scoring (`Σ\|S_c\|²`) | 5.2688 | 7 | `{1:1, 2:4, 3:59, 4:574, 5:2425, 6:1891, 7:86}` |
+| Minimax (largest group) | 5.3429 | 7 | `{1:1, 2:3, 3:43, 4:565, 5:2217, 6:2030, 7:181}` |
+| Generated tree (rival-aware) | 5.2321 | 8 | — |
+
+Speed: **66 ms per round**, 12.6 ms per guess on average, 49.5 ms worst.
+Before the compressed scan it was 126 ms per round, for identical decisions.
+
+Head to head over the 5040 secrets — same secret for both, fewer turns wins,
+which is exactly how the tournament scores:
+
+| Rival | win | tie | loss | rival's turns |
+|---|---|---|---|---|
+| `AgenteLexicografico` | 40.4% | 40.9% | 18.7% | 5.560 |
+| `AgenteJuan` | 35.3% | 38.6% | 26.1% | 5.354 |
+| `AgenteCrucetero` | 32.2% | 50.1% | 17.7% | 5.408 |
+| `AgenteEntropico` | 13.5% | 76.4% | 10.1% | 5.281 |
+
+> **Read the tie column.** This agent's average beats all four rivals, yet
+> against `AgenteEntropico` it wins only 13.5% — because it *ties* 76.4% of
+> rounds. Turn counts are integers and strongly correlated between two strong
+> agents on the same secret, so improving the mean mostly moves you around
+> *inside* a tie. Winning more rounds needs a policy that breaks ties in your
+> favour, which is what the rival-aware tree in `generar_arbol.py` optimises
+> (it reaches 47.5 / 40.0 / 38.2 / 32.2% against these same four) — at the
+> cost of being fitted to those specific rivals.
+
+In the real environment (last notebook cell, 200 rounds each): detected as a
+single dropdown entry, **0 invalid guesses**, 40.5% / 42.5% / 17.0% against
+`AgenteEstrategico` and 100% against `AgenteAleatorio`.

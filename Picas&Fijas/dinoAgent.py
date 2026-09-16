@@ -1,15 +1,6 @@
-"""
-Agente Competidor de Picas y Fijas para Torneo.
-Cumple estrictamente con la interfaz requerida por el Ambiente Juez:
-    - start()
-    - try_attempt() -> list[int]
-    - feedBack(retroalimentacionLista) donde retroalimentacionLista = [picas, fijas]
-"""
-
+import random
 from itertools import permutations
 from collections import defaultdict
-import random
-
 
 class AgenteCompetidor:
     """
@@ -32,7 +23,26 @@ class AgenteCompetidor:
         self.start()
 
     # ------------------------------------------------------------------
-    # MÉTODOS OBLIGATORIOS SEGÚN LA INTERFAZ DEL TORNEO
+    # MÉTODO DE ENTRADA REQUERIDO POR EL TORNEO
+    # ------------------------------------------------------------------
+    def compute(self, feedback):
+        """
+        Punto de entrada universal del torneo.
+        - Si recibe [-1, -1] inicializa el estado y hace el primer intento.
+        - Si recibe [picas, fijas], filtra los candidatos con base en el 
+          intento anterior y calcula la siguiente jugada.
+        """
+        # Si feedback no es [-1, -1], procesar la retroalimentación previa
+        if feedback != [-1, -1] and feedback is not None:
+            self.feedBack(feedback)
+        else:
+            # Si es el inicio de una nueva ronda, reiniciar el estado interno
+            self.start()
+
+        return self.try_attempt()
+
+    # ------------------------------------------------------------------
+    # MÉTODOS DE LÓGICA E INTERFAZ INTERNA
     # ------------------------------------------------------------------
     def start(self):
         """Inicializa o reinicia el estado interno del agente al inicio de una ronda."""
@@ -105,7 +115,7 @@ class AgenteCompetidor:
         """
         Recibe retroalimentación del ambiente tras el último intento.
         
-        Parametros:
+        Parámetros:
             retroalimentacionLista: list[int] -> [picas, fijas]
         """
         if not self._ultimo_intento or not retroalimentacionLista:

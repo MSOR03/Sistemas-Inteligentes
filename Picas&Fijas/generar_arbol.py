@@ -44,6 +44,7 @@ Uso:
 """
 
 import argparse
+import heapq
 import json
 import multiprocessing as mp
 import os
@@ -157,19 +158,78 @@ def _k(n):
     return KS[-1][1]
 
 
+# Por encima de este numero de candidatos sale mas barato el bitset de 5040
+# bits del agente; por debajo gana el espacio comprimido (medido: 2.7x con 4
+# candidatos, 3.4x con 24, 1.6x con 1000, y ya se pierde con 5040).
+UMBRAL_COMPACTO = 2000
+
+
+def _estadisticas_todas(conjunto, indices):
+    """[(suma_cuadrados, peor)] de las 5040 jugadas sobre `conjunto`.
+
+    Da exactamente lo mismo que [A._estadisticas(g, conjunto) for g in ...],
+    pero cuando quedan pocos candidatos trabaja en un espacio comprimido: el
+    candidato numero i es el bit i, asi que las mascaras caben en len(indices)
+    bits en vez de los 5040 del bitset (que ocupa 629 bytes SIEMPRE, queden
+    4 candidatos o 5000, y por eso el barrido no se abarataba al profundizar)."""
+    if len(indices) > UMBRAL_COMPACTO:
+        return [A._estadisticas(g, conjunto) for g in range(A.N_CODIGOS)]
+
+    pos = [[0] * A.BASE for _ in range(A.LARGO)]
+    tiene = [0] * A.BASE
+    for i, c in enumerate(indices):
+        codigo = A.CODIGOS[c]
+        bit = 1 << i
+        for p in range(A.LARGO):
+            d = codigo[p]
+            pos[p][d] |= bit
+            tiene[d] |= bit
+
+    lleno = (1 << len(indices)) - 1
+    salida = []
+    for g in range(A.N_CODIGOS):
+        codigo = A.CODIGOS[g]
+        # celdas por fijas; f4 es la clase ganadora y se descarta, igual que
+        # hace A._particion al topar f en LARGO - 1.
+        f0, f1, f2, f3 = lleno, 0, 0, 0
+        for p in range(A.LARGO):
+            m = pos[p][codigo[p]]
+            f3, f2, f1, f0 = (f3 & ~m) | (f2 & m), (f2 & ~m) | (f1 & m), (f1 & ~m) | (f0 & m), f0 & ~m
+        # celdas por digitos en comun
+        c0, c1, c2, c3, c4 = lleno, 0, 0, 0, 0
+        for p in range(A.LARGO):
+            m = tiene[codigo[p]]
+            c4, c3, c2, c1, c0 = (c4 | (c3 & m), (c3 & ~m) | (c2 & m),
+                                  (c2 & ~m) | (c1 & m), (c1 & ~m) | (c0 & m), c0 & ~m)
+        suma_cuadrados = 0
+        peor = 0
+        for comunes in (c0, c1, c2, c3, c4):
+            if comunes:
+                for fijas in (f0, f1, f2, f3):
+                    interseccion = fijas & comunes
+                    if interseccion:
+                        cuenta = pc(interseccion)
+                        suma_cuadrados += cuenta * cuenta
+                        if cuenta > peor:
+                            peor = cuenta
+        salida.append((suma_cuadrados, peor))
+    return salida
+
+
 def _pool(conjunto, k):
     """Jugadas a evaluar exactamente en este nodo."""
-    puntuadas = []
-    for g in range(A.N_CODIGOS):
-        s2, peor = A._estadisticas(g, conjunto)
-        no_cand = 0 if (conjunto >> g) & 1 else 1
-        puntuadas.append((s2, peor, no_cand, g))
-    por_cuadrados = sorted(puntuadas)
-    por_peor = sorted(puntuadas, key=lambda x: (x[1], x[0], x[2]))
-    candidatos = [x for x in por_cuadrados if x[2] == 0]
+    indices = A._indices(conjunto)
+    candidato = set(indices)
+    puntuadas = [(s2, peor, 0 if g in candidato else 1, g)
+                 for g, (s2, peor) in enumerate(_estadisticas_todas(conjunto, indices))]
+    # nsmallest da lo mismo que sorted(...)[:cuantos] (las tuplas acaban en g,
+    # asi que no hay empates) pero sin ordenar las 5040 enteras.
+    por_cuadrados = heapq.nsmallest(k, puntuadas)
+    por_peor = heapq.nsmallest(max(1, k // 2), puntuadas, key=lambda x: (x[1], x[0], x[2]))
+    candidatos = heapq.nsmallest(max(2, k // 3), (x for x in puntuadas if x[2] == 0))
     pool = []
-    for lista, cuantos in ((por_cuadrados, k), (por_peor, max(1, k // 2)), (candidatos, max(2, k // 3))):
-        for x in lista[:cuantos]:
+    for lista in (por_cuadrados, por_peor, candidatos):
+        for x in lista:
             if x[3] not in pool:
                 pool.append(x[3])
     return pool
@@ -314,10 +374,21 @@ def main():
           % (nombres, args.peso_rivales, args.peso_carrera, ks, args.k2, len(tareas)))
 
     mejores = {}
+    hechas = 0
+    inicio_busqueda = time.time()
     with mp.Pool(args.procesos, initializer=_configurar, initargs=(ks, pesos)) as pool:
         for ruta, g, c, politica in pool.imap_unordered(_tarea, tareas):
             if c is not None and (ruta not in mejores or c < mejores[ruta][0]):
                 mejores[ruta] = (c, g, politica)
+            # Las tareas van de mayor a menor, asi que lo que queda es mas
+            # barato que lo hecho: la estimacion sobra, nunca se queda corta.
+            hechas += 1
+            transcurrido = time.time() - inicio_busqueda
+            sys.stderr.write("\r  %d/%d tareas | %.0fs | faltan <%.0fs   "
+                             % (hechas, len(tareas), transcurrido,
+                                transcurrido * (len(tareas) - hechas) / hechas))
+            sys.stderr.flush()
+    sys.stderr.write("\n")
 
     arbol = {"": apertura}
     for (picas, fijas), x in hijos:

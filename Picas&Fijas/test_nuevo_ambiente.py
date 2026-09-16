@@ -34,15 +34,36 @@ AQUI = os.path.dirname(os.path.abspath(__file__))
 NOTEBOOK = os.path.join(AQUI, "Ambientes", "Ambiente_Definitivo.ipynb")
 
 # Archivos que se ponen en la "carpeta de Drive" simulada.
-ARCHIVOS = ["Picas_Y_Fijas_Agent.py", "rival_real.py", "rivales_nuevo_ambiente.py"]
-MI_AGENTE = "AgenteJJ&S (Picas_Y_Fijas_Agent.py)"
+ARCHIVOS = [
+    "Picas_Y_Fijas_Agent_Compute.py",
+    "Rival_Lexicografico.py",
+    "Rival_Minimax.py",
+    "Rival_Entropico.py",
+    "Rival_Crucetero.py",
+    "Rival_Juan.py",
+]
+AGENTE_PY = "Picas_Y_Fijas_Agent_Compute.py"
+# El nombre de la clase lo pone el propio .py (NOMBRE_AGENTE), asi que la
+# entrada del desplegable se busca por ARCHIVO y no se escribe a mano: asi
+# renombrar el agente no rompe esta prueba.
+MI_AGENTE = None
+
+
+def _clave_de_mi_agente(ui):
+    claves = [k for k in ui.agentes_disponibles if k.endswith("(%s)" % AGENTE_PY)]
+    return claves[0] if len(claves) == 1 else None
+# El ambiente definitivo solo registra clases con `compute`. Los rivales de
+# `rival_real.py` y `rivales_nuevo_ambiente.py` usan la interfaz vieja
+# (start/try_attempt/feedBack) y por eso NO aparecen en su desplegable; los
+# `Rival_*.py` son esos mismos agentes portados a `compute`.
 RIVALES = [
     "AgenteEstrategico",                                  # incluido en el notebook
     "AgenteAleatorio",                                    # incluido en el notebook
-    "PicasFijasAgent (rival_real.py)",                    # agente real de un companero
-    "AgenteJuan (rivales_nuevo_ambiente.py)",             # examples/: AgentJuan
-    "AgenteCrucetero (rivales_nuevo_ambiente.py)",        # examples/: Crucetero
-    "AgenteEntropico (rivales_nuevo_ambiente.py)",        # examples/: CrucetaEntropica
+    "RivalLexicografico (Rival_Lexicografico.py)",        # suelo: primer candidato
+    "RivalJuan (Rival_Juan.py)",                          # apertura 3579 + tabla
+    "RivalCrucetero (Rival_Crucetero.py)",                # minimax con corte
+    "RivalMinimax (Rival_Minimax.py)",                    # minimax de Knuth
+    "RivalEntropico (Rival_Entropico.py)",                # maxima entropia
 ]
 
 
@@ -90,13 +111,19 @@ def _instalar_sustitutos():
 
 
 def _celda(marcador):
+    """Fuente de la ULTIMA celda de codigo que contiene `marcador`.
+
+    Tiene que ser la ultima: el notebook trae dos celdas con
+    `class TorneoPicasFijasUI`, la del ambiente viejo (start/try_attempt/
+    feedBack) y la definitiva (compute). Quedarse con la primera hacia que
+    esta prueba midiera un ambiente que ya no es el del torneo."""
     with open(NOTEBOOK, encoding="utf-8") as f:
         nb = json.load(f)
-    for celda in nb["cells"]:
-        fuente = "".join(celda["source"])
-        if celda["cell_type"] == "code" and marcador in fuente:
-            return fuente
-    raise RuntimeError("No se encontro la celda con %r" % marcador)
+    fuentes = ["".join(c["source"]) for c in nb["cells"]
+               if c["cell_type"] == "code" and marcador in "".join(c["source"])]
+    if not fuentes:
+        raise RuntimeError("No se encontro la celda con %r" % marcador)
+    return fuentes[-1]
 
 
 def cargar_ambiente():
@@ -119,21 +146,35 @@ def cargar_ambiente():
 #  1) Carga del agente
 # --------------------------------------------------------------------------- #
 def verificar_carga():
+    """El ambiente definitivo solo pide `compute`: NO exige heredar de
+    `interfazAgente` (su escaner ni lo mira). Por eso aqui se comprueba el
+    contrato de verdad y no la herencia."""
+    global MI_AGENTE
     ui = cargar_ambiente()
-    interfaz = sys.modules["__main__"].interfazAgente
     print("=" * 78)
-    print(" 1. CARGA EN EL AMBIENTE (escanear_directorio + interfazAgente)")
+    print(" 1. CARGA EN EL AMBIENTE (escanear_directorio, interfaz `compute`)")
     print("=" * 78)
-    claves_mias = [k for k in ui.agentes_disponibles if "Picas_Y_Fijas_Agent.py" in k]
-    clase = ui.agentes_disponibles.get(MI_AGENTE)
+    claves_mias = [k for k in ui.agentes_disponibles if k.endswith("(%s)" % AGENTE_PY)]
+    MI_AGENTE = _clave_de_mi_agente(ui)
+    clase = ui.agentes_disponibles.get(MI_AGENTE) if MI_AGENTE else None
+    primero = None
+    if clase is not None:
+        try:
+            primero = clase().compute([-1, -1])
+        except Exception as e:
+            primero = "EXCEPCION: %s" % e
+    valido = (isinstance(primero, list) and len(primero) == 4
+              and len(set(primero)) == 4
+              and all(isinstance(d, int) and 0 <= d <= 9 for d in primero))
     checks = {
         "el ambiente detecta el agente": clase is not None,
         "una sola entrada en el desplegable": len(claves_mias) == 1,
-        "hereda de interfazAgente (__mro__)": clase is not None and interfaz in clase.__mro__,
-        "sin metodos abstractos pendientes": clase is not None and not clase.__abstractmethods__,
-        "se instancia sin argumentos": clase is not None and clase() is not None,
+        "tiene compute": clase is not None and hasattr(clase, "compute"),
+        "se instancia sin argumentos": clase is not None,
+        "compute([-1,-1]) da 4 digitos unicos 0-9": valido,
     }
     print("  entradas del agente en el desplegable: %s" % claves_mias)
+    print("  primer intento: %s" % (primero,))
     for texto, ok in checks.items():
         print("  %-42s %s" % (texto, "OK" if ok else "FALLA"))
     return all(checks.values())
@@ -153,7 +194,7 @@ def _ronda(args):
     if _UI is None:
         _UI = cargar_ambiente()
     ui = _UI
-    ui.dd_agenteA.value = MI_AGENTE
+    ui.dd_agenteA.value = MI_AGENTE or _clave_de_mi_agente(ui)
     ui.dd_agenteB.value = rival
     ui.input_rondas.value = 1
     ui.input_semilla.value = "ronda-%d" % i

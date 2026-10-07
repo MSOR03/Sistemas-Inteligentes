@@ -13,3 +13,12 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+
+
+# Diamond Rush Agent
+
+diamond-rush-agent/.venv/
+diamond-rush-agent/**/__pycache__/
+diamond-rush-agent/**/*.pyc
+diamond-rush-agent/.pytest_cache/
+diamond-rush-agent/.vscode/

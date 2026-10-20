@@ -65,7 +65,8 @@ GRID_Y0 = Y0 - CELL_HEIGHT
 TOP_ROW_VISIBLE_FROM = 21
 
 # Lo único que se intenta distinguir en la fila tapada.
-TOP_ROW_SYMBOLS = (WALL, FLOOR, DIAMOND)
+# El jugador también puede llegar a esa fila (nivel 8).
+TOP_ROW_SYMBOLS = (WALL, FLOOR, DIAMOND, PLAYER)
 
 
 # ----------------------------------------------------
@@ -83,8 +84,9 @@ UNKNOWN_DISTANCE = 38
 WALL_BRIGHTNESS = 140
 
 # Cantidad de píxeles de "agujeros" a partir de la cual
-# un piso se considera trampa de púas (piso <= 66, púas >= 115).
-SPIKE_DOTS = 90
+# un piso se considera trampa de púas (piso <= 66, púas >= 86:
+# en el nivel 6 una trampa al lado de un muro da solo 86).
+SPIKE_DOTS = 76
 
 # Cantidad de píxeles grisáceos (el fondo del hueco) a partir
 # de la cual un piso se considera hueco (resto <= 102, huecos >= 271).
@@ -117,6 +119,11 @@ RAISED_PIXELS = 12
 # del foso; una roca sobre el piso casi no tiene negro
 # (hueco rellenado: 110 píxeles, rocas <= 27).
 FILLED_DARK_PIXELS = 60
+
+# A veces el hueco rellenado se parece más a una roca que a su
+# template. Con tanto negro alrededor no es una roca suelta
+# (huecos rellenados >= 110, rocas sobre placa <= 67).
+FILLED_ROCK_DARK_PIXELS = 90
 
 # El jugador está animado y no siempre coincide con sus
 # templates. Si ninguna celda lo reconoce, se toma la celda
@@ -303,6 +310,12 @@ def classify_cell(cell, prepared, top_row=False):
         return best_symbol, best_distance
 
     if best_symbol == FILLED:
+        return FLOOR, best_distance
+
+    if (
+        best_symbol == ROCK
+        and count_black_pixels(cell) >= FILLED_ROCK_DARK_PIXELS
+    ):
         return FLOOR, best_distance
 
     if best_symbol in (FLOOR, SPIKE):

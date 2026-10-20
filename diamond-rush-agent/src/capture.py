@@ -1,3 +1,5 @@
+import sys
+
 import pyautogui
 import numpy as np
 import cv2
@@ -24,9 +26,49 @@ def capture_region(x, y, width, height):
     """
     Captura un rectángulo de la pantalla como imagen BGR.
 
-    Va directo a X11: tarda ~20 ms, contra los ~300 ms de
-    pyautogui.screenshot(), así que sirve para vigilar el
-    juego mientras se ejecuta un plan.
+    Es rápida, así que sirve para vigilar el juego mientras
+    se ejecuta un plan. En Linux va directo a X11; en
+    Windows y macOS usa PIL.ImageGrab, la misma función que
+    usa pyautogui.screenshot(), así las coordenadas coinciden
+    con las de capture_screen().
+    """
+
+    if not sys.platform.startswith("linux"):
+        return _capture_region_imagegrab(x, y, width, height)
+
+    return _capture_region_x11(x, y, width, height)
+
+
+def _capture_region_imagegrab(x, y, width, height):
+
+    from PIL import ImageGrab
+
+    shot = ImageGrab.grab(
+        bbox=(x, y, x + width, y + height)
+    )
+
+    image = cv2.cvtColor(
+        np.array(shot.convert("RGB")),
+        cv2.COLOR_RGB2BGR
+    )
+
+    if image.shape[:2] == (height, width):
+        return image
+
+    # La parte que quede fuera de la pantalla se deja en negro.
+    padded = np.zeros((height, width, 3), dtype=np.uint8)
+
+    h = min(height, image.shape[0])
+    w = min(width, image.shape[1])
+
+    padded[:h, :w] = image[:h, :w]
+
+    return padded
+
+
+def _capture_region_x11(x, y, width, height):
+    """
+    Tarda ~20 ms, contra los ~300 ms de pyautogui.screenshot().
     """
 
     global _display

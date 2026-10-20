@@ -3,7 +3,11 @@ import time
 import numpy as np
 import pyautogui
 
-from level_reader import cell_features, cell_image
+from level_reader import (
+    TOP_ROW_VISIBLE_FROM,
+    cell_features,
+    cell_image
+)
 
 
 # PyAutoGUI añade una pausa propia tras cada llamada;
@@ -56,10 +60,15 @@ def press(move):
 
 def cell_change(image_a, image_b, cell):
 
+    # En la fila tapada por el HUD solo se compara la franja
+    # visible: con la celda entera el HUD diluye el cambio y
+    # un paso hacia esa fila parece no haber ocurrido.
+    top = TOP_ROW_VISIBLE_FROM if cell[0] == 0 else 0
+
     return float(
         np.abs(
-            cell_features(cell_image(image_a, *cell))
-            - cell_features(cell_image(image_b, *cell))
+            cell_features(cell_image(image_a, *cell)[top:])
+            - cell_features(cell_image(image_b, *cell)[top:])
         ).mean()
     )
 

@@ -14,6 +14,7 @@ from level_reader import (
     read_level
 )
 from solver import solve
+from stitcher import LevelMap
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -73,33 +74,98 @@ class DiamondRushAgent:
                 self.knowledge_file.read_text()
             )
 
+    def perceive(self, percept):
+
+        if isinstance(percept, LevelMap):
+            return percept.read(self.templates)
+
+        return read_level(percept, self.templates)
+
     def excluded(self):
 
-        return {
+        pairs = {
             (tuple(gate), tuple(plate))
             for gate, plate in self.knowledge.get(self.level, [])
         }
 
-    def compute(self, percept, keys_in_hand=0, replanning=False):
+        # Si lo aprendido descarta todas las placas de una reja,
+        # algo se observó mal (por ejemplo, la reja aún se estaba
+        # moviendo): se ignora lo aprendido sobre esa reja.
+        if len(self.gates) <= len(self.plates):
+
+            for gate in self.gates:
+
+                if all(
+                    (gate, plate) in pairs
+                    for plate in self.plates
+                ):
+                    print(
+                        f"AVISO: lo aprendido descarta todas las "
+                        f"placas de la reja {gate}; lo ignoro."
+                    )
+
+                    pairs = {
+                        pair
+                        for pair in pairs
+                        if pair[0] != gate
+                    }
+
+        return pairs
+
+    def restore(self, grid, player=None):
         """
-        percept: imagen BGR del área del juego.
+        Corrige la lectura de un nivel ya empezado con lo que
+        el agente sabe de él.
+
+        player: casilla donde el controlador vio llegar al
+        jugador. Es más fiable que reconocerlo en la imagen
+        (su animación no siempre coincide con los templates).
+        """
+
+        # Una placa vacía se lee como placa: si en una placa
+        # conocida se lee piso, es una roca encima (con el borde
+        # oscuro de la placa se confunde con un hueco rellenado).
+        for row, col in self.plates:
+
+            if grid[row][col] == FLOOR:
+                grid[row][col] = ROCK
+
+        if player is not None:
+
+            for cell in find_cells(grid, PLAYER):
+                grid[cell[0]][cell[1]] = (
+                    PLATE if cell in self.plates else FLOOR
+                )
+
+            grid[player[0]][player[1]] = PLAYER
+
+    def compute(
+        self,
+        percept,
+        keys_in_hand=0,
+        replanning=False,
+        player=None
+    ):
+        """
+        percept: imagen BGR del área del juego, o el mapa
+        (stitcher.LevelMap) de un nivel que no cabe en pantalla.
         keys_in_hand: llaves que el jugador ya trae consigo.
         replanning: el nivel ya estaba empezado (se conserva
         la memoria del nivel en lugar de reiniciarla).
+        player: casilla conocida del jugador al replanificar.
 
         Devuelve la lista de acciones
         ("up", "down", "left", "right") o None
         si no encuentra un plan.
         """
 
-        grid = read_level(
-            percept,
-            self.templates
-        )
+        grid = self.perceive(percept)
 
         self.learned = []
 
         if replanning and self.level is not None:
+
+            self.restore(grid, player)
 
             self.observe(grid)
 
@@ -111,6 +177,11 @@ class DiamondRushAgent:
                     grid[row][col] = GATE
 
         else:
+
+            if player is not None:
+                # Nivel recién explorado: el jugador ya se movió.
+                self.plates = []
+                self.restore(grid, player)
 
             self.level = format_grid(grid)
             self.gates = find_cells(grid, GATE)
@@ -141,10 +212,11 @@ class DiamondRushAgent:
 
         self.learned = []
 
-        self.observe(
-            read_level(percept, self.templates),
-            player
-        )
+        grid = self.perceive(percept)
+
+        self.restore(grid, player)
+
+        self.observe(grid, player)
 
         return bool(self.learned)
 

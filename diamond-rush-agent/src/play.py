@@ -13,13 +13,17 @@ from game_detector import (
     locate_game_area
 )
 from level_reader import (
+    DOOR,
+    EXIT,
     PLAYER,
     UNKNOWN,
     cell_image,
     find_cells,
     format_grid
 )
+from explorer import MAX_EXPLORE_MOVES, cell_after, frontier
 from solver import format_plan, keys_in_hand_after
+from stitcher import LevelMap
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +53,23 @@ LAST_GAME = (
     PROJECT_ROOT
     / "screenshots"
     / "last_game.png"
+)
+
+
+# Pantalla completa de la última lectura, para comprobar que
+# el recorte del juego no deja parte del tablero afuera.
+LAST_SCREEN = (
+    PROJECT_ROOT
+    / "screenshots"
+    / "last_screen.png"
+)
+
+
+# Mapa armado al explorar un nivel más grande que la pantalla.
+LAST_MAP = (
+    PROJECT_ROOT
+    / "screenshots"
+    / "last_map.png"
 )
 
 
@@ -109,6 +130,7 @@ def capture_game():
     )
 
     cv2.imwrite(str(LAST_GAME), game)
+    cv2.imwrite(str(LAST_SCREEN), screen)
 
     # El área está en coordenadas de la pantalla escalada.
     scale = game_area["scale"]
@@ -177,16 +199,86 @@ def print_learned(agent):
         )
 
 
-def plan_level(agent, game, keys_in_hand=0, replanning=False):
+def explore_level(agent, game, grab, args):
     """
-    Percibe, planifica y muestra el resultado.
+    Si el nivel sigue fuera de la pantalla, pasea al jugador
+    para que la cámara lo muestre entero y arma su mapa.
+
+    Devuelve (mapa, casilla del jugador en su tablero, llaves
+    en la mano), o (None, None, 0) si el nivel cabe en pantalla.
     """
 
-    plan = agent.compute(game, keys_in_hand, replanning)
+    from explorer import map_level
+
+    level_map = LevelMap(game)
+
+    grid = level_map.read(agent.templates)
+
+    players = find_cells(grid, PLAYER)
+
+    # Con la salida a la vista el nivel cabe en pantalla: una
+    # fila abierta junto al HUD no es razón para pasear.
+    if (
+        not frontier(grid)
+        or not players
+        or find_cells(grid, EXIT)
+    ):
+        return None, None, 0
+
+    print()
+    print(format_grid(grid))
+    print()
+
+    if args.dry_run:
+        print(
+            "El nivel sigue fuera de la pantalla (~ = sin ver); "
+            "sin enviar teclas no puedo explorarlo."
+        )
+        return None, None, 0
+
+    print("El nivel sigue fuera de la pantalla: lo exploro...")
+
+    pos, keys_in_hand = map_level(
+        level_map,
+        agent.templates,
+        grab,
+        level_map.to_map(players[0]),
+        args.delay,
+        args.explore_moves
+    )
+
+    level_map.freeze()
+    level_map.save(LAST_MAP)
+
+    print(f"Mapa del nivel guardado en {LAST_MAP}")
+
+    return level_map, level_map.to_grid(pos), keys_in_hand
+
+
+def plan_level(
+    agent,
+    percept,
+    keys_in_hand=0,
+    replanning=False,
+    player=None
+):
+    """
+    Percibe, planifica y muestra el resultado.
+
+    percept: imagen del juego o mapa del nivel (LevelMap).
+    player: casilla conocida del jugador al replanificar.
+    """
+
+    plan = agent.compute(percept, keys_in_hand, replanning, player)
 
     print()
     print(format_grid(agent.grid))
     print()
+
+    if isinstance(percept, LevelMap):
+        game = percept.image()
+    else:
+        game = percept
 
     save_unknown_cells(game, agent.grid)
 
@@ -194,6 +286,12 @@ def plan_level(agent, game, keys_in_hand=0, replanning=False):
 
     if not find_cells(agent.grid, PLAYER):
         print("No se encontró al jugador en el tablero.")
+        return None
+
+    # Sin salida el solver solo pide los diamantes visibles: con
+    # ninguno a la vista, el plan vacío daría el nivel por ganado.
+    if not find_cells(agent.grid, EXIT):
+        print("No se ve la salida: falta ver parte del nivel.")
         return None
 
     if plan is None:
@@ -210,7 +308,7 @@ def plan_level(agent, game, keys_in_hand=0, replanning=False):
 
 def play(args):
 
-    from controller import execute_plan
+    from controller import execute_plan, wait_until_still
 
     agent = DiamondRushAgent()
 
@@ -231,21 +329,46 @@ def play(args):
     # no se ven en el tablero, hay que llevar la cuenta.
     keys_in_hand = 0
 
+    # Casilla del jugador al replanificar: el controlador
+    # comprobó cada paso en pantalla, así que se sabe dónde
+    # está aunque su imagen no se reconozca.
+    player = None
+
+    # Mapa del nivel en curso si no cabe en pantalla: se conserva
+    # al replanificar, porque una captura nueva solo ve una parte.
+    level_map = None
+
     while solved < args.levels:
 
-        captured = capture_game()
+        if level_map is None:
 
-        if captured is None:
-            print("ERROR: no se encontró Diamond Rush en pantalla.")
-            return
+            captured = capture_game()
 
-        game, grab = captured
+            if captured is None:
+                print("ERROR: no se encontró Diamond Rush en pantalla.")
+                return
+
+            game, grab = captured
+
+        if not started:
+
+            level_map, player, keys_in_hand = explore_level(
+                agent,
+                game,
+                grab,
+                args
+            )
+
+        elif level_map is not None:
+
+            level_map.update(grab())
 
         plan = plan_level(
             agent,
-            game,
+            level_map if level_map is not None else game,
             keys_in_hand,
-            replanning=started
+            replanning=started,
+            player=player
         )
 
         if plan is None:
@@ -263,19 +386,30 @@ def play(args):
             ):
                 return False
 
-            # Dar tiempo a que la reja termine de moverse.
+            # Dar tiempo a que la reja termine de moverse: si se
+            # mira a mitad de la animación, se aprende algo falso.
             time.sleep(GATE_ANIMATION)
 
-            return agent.look(grab(), pos)
+            if level_map is None:
+                wait_until_still(grab, agent.gates)
+                return agent.look(grab(), pos)
+
+            wait_until_still(grab, agent.gates, level_map.offset)
+            level_map.update(grab())
+
+            return agent.look(level_map, pos)
 
         started = True
 
+        start = find_cells(agent.grid, PLAYER)[0]
+
         done, status = execute_plan(
             plan,
-            find_cells(agent.grid, PLAYER)[0],
+            start,
             grab,
             args.delay,
-            watch_plates
+            watch_plates,
+            camera=level_map
         )
 
         if status != "done":
@@ -285,6 +419,8 @@ def play(args):
                 plan[:done],
                 keys_in_hand
             )
+
+            player = cell_after(start, plan[:done])
 
         if status == "interrupted":
 
@@ -302,7 +438,21 @@ def play(args):
                 f"({plan[done]}) no tuvo efecto en el juego."
             )
 
-            if done == 0:
+            row, col = cell_after(start, plan[:done + 1])
+
+            if agent.grid[row][col] == DOOR and keys_in_hand > 0:
+
+                # La puerta no se abrió: el jugador no tiene
+                # llave, aunque la cuenta diga lo contrario (una
+                # celda leída como llave no lo era).
+                print(
+                    "La puerta no se abrió: el jugador no tiene "
+                    "llave. Corrijo la cuenta de llaves."
+                )
+
+                keys_in_hand = 0
+
+            elif done == 0:
                 print(
                     "El juego no está recibiendo las teclas "
                     "o el tablero se leyó mal."
@@ -321,6 +471,8 @@ def play(args):
         replans = 0
         started = False
         keys_in_hand = 0
+        player = None
+        level_map = None
 
         if solved < args.levels:
             # Esperar la transición al siguiente nivel.
@@ -365,6 +517,13 @@ def main():
         type=int,
         default=6,
         help="Veces que se replanifica si un movimiento falla"
+    )
+
+    parser.add_argument(
+        "--explore-moves",
+        type=int,
+        default=MAX_EXPLORE_MOVES,
+        help="Movimientos máximos para explorar un nivel que no cabe en pantalla"
     )
 
     parser.add_argument(

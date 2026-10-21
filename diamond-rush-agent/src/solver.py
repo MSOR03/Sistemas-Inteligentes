@@ -18,6 +18,7 @@ from level_reader import (
     RAISED,
     FLOOR,
     UNKNOWN,
+    UNSEEN,
     find_cells
 )
 
@@ -75,6 +76,21 @@ FALLBACK_WEIGHT = 2
 # En esa segunda búsqueda, costo extra por diamante sin recoger.
 FALLBACK_MISSING_PENALTY = 5
 
+# También en esa búsqueda, sin diamantes pendientes, se tiene
+# en cuenta qué huecos hay que rellenar para llegar a la salida
+# (los del camino más barato desde el inicio, pasando por encima
+# de rocas y huecos) y lo lejos que está la roca más cercana de
+# cada uno. Con la distancia en línea recta, un nivel cuya
+# salida está encerrada tras huecos (nivel 20) no se resolvía:
+# acercar rocas a los huecos no acercaba la estimación a la meta.
+RELAXED_HOLE_COST = 8
+RELAXED_ROCK_COST = 2
+
+# Peso de cada casilla que le falta recorrer a una roca hasta su
+# hueco, y costo de un hueco al que ya no puede llegar ninguna.
+HOLE_ROCK_WEIGHT = 3
+HOLE_WITHOUT_ROCK = 30
+
 
 MOVES = (
     ("up", -1, 0),
@@ -83,7 +99,7 @@ MOVES = (
     ("right", 0, 1)
 )
 
-BLOCKED = (WALL, LAVA, RAISED, UNKNOWN)
+BLOCKED = (WALL, LAVA, RAISED, UNKNOWN, UNSEEN)
 
 
 def manhattan(a, b):
@@ -127,10 +143,14 @@ def link_options(gates, plates, excluded=()):
     return options or [{}]
 
 
-def solve(grid, keys_in_hand=0, plates=(), excluded=()):
+def solve(grid, keys_in_hand=0, plates=(), excluded=(), budget=None):
     """
     Busca la secuencia de movimientos que recoge todos
     los diamantes y llega a la salida.
+
+    budget: tope de expansiones de cada búsqueda, para
+    consultas rápidas (al explorar) en las que rendirse
+    pronto es mejor que esperar.
 
     keys_in_hand: llaves que el jugador ya trae consigo
     (al replanificar a mitad de un nivel).
@@ -181,6 +201,9 @@ def solve(grid, keys_in_hand=0, plates=(), excluded=()):
         for hidden_spikes in (True, False)
     ]
 
+    def capped(expansions):
+        return expansions if budget is None else min(expansions, budget)
+
     for links, hidden_spikes in attempts:
 
         last = (links, hidden_spikes) == attempts[-1]
@@ -188,7 +211,7 @@ def solve(grid, keys_in_hand=0, plates=(), excluded=()):
         plan, exhausted = search(
             grid,
             1,
-            OPTIMAL_EXPANSIONS,
+            capped(OPTIMAL_EXPANSIONS),
             keys_in_hand,
             hidden_spikes=hidden_spikes,
             links=links
@@ -199,7 +222,7 @@ def solve(grid, keys_in_hand=0, plates=(), excluded=()):
             plan, _ = search(
                 grid,
                 FALLBACK_WEIGHT,
-                MAX_EXPANSIONS if last else CAUTIOUS_EXPANSIONS,
+                capped(MAX_EXPANSIONS if last else CAUTIOUS_EXPANSIONS),
                 keys_in_hand,
                 FALLBACK_MISSING_PENALTY,
                 hidden_spikes,
@@ -298,7 +321,144 @@ def search(
 
     all_diamonds = (1 << len(diamonds)) - 1
 
-    def heuristic(pos, collected):
+    def passable(cell):
+
+        return (
+            0 <= cell[0] < rows
+            and 0 <= cell[1] < cols
+            and grid[cell[0]][cell[1]] not in BLOCKED
+        )
+
+    def holes_on_the_way():
+        """
+        Huecos del camino más barato del inicio a la salida si
+        se pudiera pasar por encima de todo (cruzar un hueco
+        cuesta conseguirle una roca; cruzar una roca, apartarla).
+        """
+
+        best = {start: 0}
+        came_from = {start: None}
+        queue = [(0, start)]
+
+        while queue:
+
+            distance, cell = heapq.heappop(queue)
+
+            if cell == goal:
+                break
+
+            if distance > best[cell]:
+                continue
+
+            for _, dr, dc in MOVES:
+
+                nxt = (cell[0] + dr, cell[1] + dc)
+
+                if not passable(nxt):
+                    continue
+
+                if nxt in start_rocks:
+                    extra = RELAXED_ROCK_COST
+                elif nxt in holes:
+                    extra = RELAXED_HOLE_COST
+                else:
+                    extra = 1
+
+                if distance + extra < best.get(nxt, float("inf")):
+                    best[nxt] = distance + extra
+                    came_from[nxt] = cell
+                    heapq.heappush(queue, (distance + extra, nxt))
+
+        if goal not in came_from:
+            return []
+
+        cells = []
+        cell = goal
+
+        while cell is not None:
+
+            if cell in holes:
+                cells.append(cell)
+
+            cell = came_from[cell]
+
+        return cells
+
+    def push_distances(hole):
+        """
+        Cuántos empujones necesita una roca desde cada casilla
+        para caer en hole, mirando solo muros (BFS hacia atrás).
+        La roca no puede pasar por otro hueco: caería en él.
+        """
+
+        distance = {hole: 0}
+        queue = deque([hole])
+
+        while queue:
+
+            cell = queue.popleft()
+
+            for _, dr, dc in MOVES:
+
+                # La roca llega a cell desde before, empujada
+                # por el jugador parado en behind.
+                before = (cell[0] - dr, cell[1] - dc)
+                behind = (before[0] - dr, before[1] - dc)
+
+                if (
+                    before in distance
+                    or before in holes
+                    or not passable(before)
+                    or not passable(behind)
+                ):
+                    continue
+
+                distance[before] = distance[cell] + 1
+                queue.append(before)
+
+        return distance
+
+    needed_holes = []
+
+    if missing_penalty and goal and holes:
+        needed_holes = [
+            (hole, push_distances(hole))
+            for hole in holes_on_the_way()
+        ]
+
+    def holes_cost(rocks, filled):
+        """
+        Asigna a cada hueco pendiente del camino la roca libre
+        más cercana (de forma voraz) y suma esas distancias.
+        """
+
+        free = set(rocks)
+        total = 0
+
+        for hole, distance in needed_holes:
+
+            if filled & holes[hole]:
+                continue
+
+            options = [
+                (distance[rock], rock)
+                for rock in free
+                if rock in distance
+            ]
+
+            if not options:
+                total += HOLE_WITHOUT_ROCK
+                continue
+
+            steps, rock = min(options)
+            free.discard(rock)
+            total += HOLE_ROCK_WEIGHT * steps
+
+        return total
+
+    def heuristic(state):
+
+        pos, collected = state[0], state[1]
 
         missing = [
             cell
@@ -307,7 +467,17 @@ def search(
         ]
 
         if not missing:
-            return manhattan(pos, goal) if goal else 0
+
+            if not goal:
+                return 0
+
+            if needed_holes:
+                return (
+                    manhattan(pos, goal)
+                    + holes_cost(state[6], state[7])
+                )
+
+            return manhattan(pos, goal)
 
         # Empuja la búsqueda hacia estados con más diamantes
         # recogidos (solo en la búsqueda no óptima).
@@ -549,10 +719,7 @@ def search(
 
     def priority(state, new_cost):
 
-        return new_cost + weight * heuristic(
-            state[0],
-            state[1]
-        )
+        return new_cost + weight * heuristic(state)
 
     start_state = (
         start, 0, 0, keys_in_hand, 0, 0, start_rocks, 0

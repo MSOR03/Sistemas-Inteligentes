@@ -33,6 +33,10 @@ RAISED = "X"
 FILLED = "f"
 UNKNOWN = "?"
 
+# Casilla del mapa que la cámara todavía no mostró
+# (niveles más grandes que la pantalla, ver stitcher.py).
+UNSEEN = "~"
+
 # El prefijo del nombre del template define la clase:
 # wall_03.png -> WALL, key_01.png -> KEY, ...
 SYMBOLS = {
@@ -65,8 +69,20 @@ GRID_Y0 = Y0 - CELL_HEIGHT
 TOP_ROW_VISIBLE_FROM = 21
 
 # Lo único que se intenta distinguir en la fila tapada.
-# El jugador también puede llegar a esa fila (nivel 8).
-TOP_ROW_SYMBOLS = (WALL, FLOOR, DIAMOND, PLAYER)
+# El jugador también puede llegar a esa fila (nivel 8), y en
+# el nivel 20 hay rocas: sin ROCK se leían como diamantes.
+TOP_ROW_SYMBOLS = (WALL, FLOOR, DIAMOND, PLAYER, ROCK)
+
+TOP_ROW_LINES = slice(TOP_ROW_VISIBLE_FROM, None)
+
+# Todo lo que queda por encima de esta línea de la vista
+# está tapado por el HUD, se mueva o no la cámara.
+VIEW_TOP = GRID_Y0 + TOP_ROW_VISIBLE_FROM
+
+# En un mapa armado con varias capturas, una celda vista solo
+# en parte se clasifica como la fila tapada (con sus mismos
+# símbolos) si se vio al menos una franja así de alta.
+MIN_VISIBLE_LINES = CELL_HEIGHT - TOP_ROW_VISIBLE_FROM
 
 
 # ----------------------------------------------------
@@ -89,10 +105,12 @@ WALL_BRIGHTNESS = 140
 SPIKE_DOTS = 76
 
 # Cantidad de píxeles grisáceos (el fondo del hueco) a partir
-# de la cual un piso se considera hueco (resto <= 102, huecos >= 271).
+# de la cual un piso se considera hueco (resto <= 102, huecos >= 245).
+# Las púas levantadas también tienen gris: en otra pantalla
+# dieron 180, así que el umbral queda entre ambos.
 # Los huecos no usan templates: se parecen demasiado al
 # borde superior de la lava en la miniatura de color.
-HOLE_GRAY_PIXELS = 180
+HOLE_GRAY_PIXELS = 210
 
 # Rango de píxeles grisáceos que debe tener una celda para
 # aceptar ciertas clases. En la miniatura de color una reja
@@ -105,6 +123,15 @@ GRAY_RANGE = {
     GATE: (GATE_GRAY_PIXELS, float("inf")),
     PLATE: (0, 150)
 }
+
+# Llaves y diamantes son los únicos objetos cian. En una zona
+# en sombra la miniatura de color es casi todo fondo, y una
+# llave se parecía más a un diamante en sombra (o un piso en
+# sombra a una llave) que a su propio template. Contar el cian
+# no depende del fondo: llaves 211-291, diamantes 270-308,
+# puertas >= 402, jugador <= 13, todo lo demás 0.
+CYAN_OBJECTS = (KEY, DIAMOND)
+CYAN_RANGE = (100, 355)
 
 # Las púas ya activadas (levantadas) son puntas gris claro
 # sobre el piso: píxeles grisáceos y más brillantes que la
@@ -196,6 +223,13 @@ def count_gray_pixels(cell):
     return int(gray.sum())
 
 
+def count_cyan_pixels(cell):
+
+    inner = cell[4:-4, 4:-4].astype(int)
+
+    return int(((inner[..., 0] - inner[..., 2]) > 40).sum())
+
+
 def count_black_pixels(cell):
 
     inner = cell[4:-4, 4:-4].astype(int)
@@ -246,23 +280,32 @@ def prepare_templates(templates):
             (
                 symbol,
                 cell_features(image),
-                cell_features(image[TOP_ROW_VISIBLE_FROM:])
+                cell_features(image[TOP_ROW_LINES]),
+                # Para las celdas vistas solo en parte.
+                image
             )
         )
 
     return prepared
 
 
-def classify_cell(cell, prepared, top_row=False):
+def classify_cell(cell, prepared, top_row=False, lines=None):
     """
     Devuelve (símbolo, distancia) de la celda.
 
     top_row: la celda está en la fila tapada por el HUD
     y solo se compara su franja visible.
+    lines: franja visible (slice de líneas) de una celda vista
+    solo en parte; se trata igual que la fila tapada.
     """
 
     if top_row:
-        features = cell_features(cell[TOP_ROW_VISIBLE_FROM:])
+        lines = TOP_ROW_LINES
+
+    top_row = lines is not None
+
+    if top_row:
+        features = cell_features(cell[lines])
     else:
         features = cell_features(cell)
 
@@ -273,7 +316,24 @@ def classify_cell(cell, prepared, top_row=False):
 
     is_pit = count_black_pixels(cell) >= FILLED_DARK_PIXELS
 
-    for symbol, full, strip in prepared:
+    # En la fila tapada asoma el diamante cian del HUD.
+    cyan_low, cyan_high = CYAN_RANGE
+    cyan_pixels = None if top_row else count_cyan_pixels(cell)
+
+    for symbol, full, strip, image in prepared:
+
+        if cyan_pixels is not None:
+
+            if (
+                (cyan_low <= cyan_pixels <= cyan_high)
+                != (symbol in CYAN_OBJECTS)
+            ):
+                continue
+
+            # La puerta verde tiene aún más cian. Su template
+            # es casi todo muro: sin esto, un muro se parece a ella.
+            if symbol == DOOR and cyan_pixels <= cyan_high:
+                continue
 
         if symbol == FILLED and not is_pit:
             continue
@@ -289,7 +349,12 @@ def classify_cell(cell, prepared, top_row=False):
         if not low <= gray_pixels <= high:
             continue
 
-        template = strip if top_row else full
+        if not top_row:
+            template = full
+        elif lines == TOP_ROW_LINES:
+            template = strip
+        else:
+            template = cell_features(image[lines])
 
         distance = float(
             np.abs(features - template).mean()
@@ -336,9 +401,44 @@ def classify_cell(cell, prepared, top_row=False):
     return best_symbol, best_distance
 
 
-def read_level(game_image, prepared):
+def visible_lines(seen_cell):
+    """
+    Franja más alta de líneas completamente vistas de una
+    celda del mapa, como slice; None si no llega al mínimo.
+    """
+
+    rows = seen_cell.all(axis=1)
+
+    best = (0, 0)
+    start = None
+
+    for index, seen in enumerate(list(rows) + [False]):
+
+        if seen and start is None:
+            start = index
+
+        if not seen and start is not None:
+
+            if index - start > best[1] - best[0]:
+                best = (start, index)
+
+            start = None
+
+    if best[1] - best[0] < MIN_VISIBLE_LINES:
+        return None
+
+    return slice(*best)
+
+
+def read_level(game_image, prepared, seen=None):
     """
     Convierte la imagen del juego en un tablero lógico.
+
+    seen: en un mapa armado con varias capturas (stitcher.py),
+    máscara de los píxeles que la cámara mostró. Una celda
+    vista solo en parte se lee como la fila tapada por el HUD,
+    y una que casi no se vio queda como UNSEEN. Sin máscara,
+    la fila tapada es la primera.
 
     Devuelve una lista de filas, cada una una lista de símbolos.
     """
@@ -349,7 +449,7 @@ def read_level(game_image, prepared):
 
     player_templates = [
         full
-        for symbol, full, _ in prepared
+        for symbol, full, _, _ in prepared
         if symbol == PLAYER
     ]
 
@@ -372,14 +472,38 @@ def read_level(game_image, prepared):
                 x:x + CELL_WIDTH
             ]
 
-            symbol, _ = classify_cell(
-                cell,
-                prepared,
-                top_row=not grid
-            )
+            if seen is None:
+
+                partial = not grid
+
+                symbol, _ = classify_cell(
+                    cell,
+                    prepared,
+                    top_row=partial
+                )
+
+            else:
+
+                lines = visible_lines(
+                    seen[
+                        y:y + CELL_HEIGHT,
+                        x:x + CELL_WIDTH
+                    ]
+                )
+
+                partial = lines != slice(0, CELL_HEIGHT)
+
+                if lines is None:
+                    symbol = UNSEEN
+                else:
+                    symbol, _ = classify_cell(
+                        cell,
+                        prepared,
+                        lines=None if not partial else lines
+                    )
 
             if (
-                grid
+                not partial
                 and player_templates
                 and symbol in (FLOOR, SPIKE, HOLE, UNKNOWN)
             ):
@@ -422,6 +546,27 @@ def find_cells(grid, symbol):
         for r, row in enumerate(grid)
         for c, value in enumerate(row)
         if value == symbol
+    ]
+
+
+def view_cell(view, row, col, offset=(0, 0)):
+    """
+    Parte de la celda que se ve en una captura de la vista:
+    lo que queda debajo del HUD y dentro de la imagen.
+
+    offset: desplazamiento (vertical, horizontal) en píxeles
+    de la cámara respecto del tablero; (0, 0) si no se movió.
+    """
+
+    y = GRID_Y0 + row * CELL_HEIGHT - offset[0]
+    x = X0 + col * CELL_WIDTH - offset[1]
+
+    top = max(y, VIEW_TOP)
+    left = max(x, 0)
+
+    return view[
+        top:max(y + CELL_HEIGHT, top),
+        left:max(x + CELL_WIDTH, left)
     ]
 
 

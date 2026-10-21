@@ -4,9 +4,8 @@ import numpy as np
 import pyautogui
 
 from level_reader import (
-    TOP_ROW_VISIBLE_FROM,
     cell_features,
-    cell_image
+    view_cell
 )
 
 
@@ -58,24 +57,47 @@ def press(move):
     pyautogui.keyUp(move)
 
 
-def cell_change(image_a, image_b, cell):
+def cell_change(image_a, image_b, cell, offset=(0, 0), offset_b=None):
+    """
+    offset_b: desplazamiento de la cámara en image_b, si se
+    movió desde image_a (por defecto, el mismo).
+    """
+
+    if offset_b is None:
+        offset_b = offset
 
     # En la fila tapada por el HUD solo se compara la franja
     # visible: con la celda entera el HUD diluye el cambio y
     # un paso hacia esa fila parece no haber ocurrido.
-    top = TOP_ROW_VISIBLE_FROM if cell[0] == 0 else 0
+    piece_a = view_cell(image_a, *cell, offset)
+    piece_b = view_cell(image_b, *cell, offset_b)
+
+    if piece_a.size == 0 or piece_b.size == 0:
+        return 0.0
 
     return float(
         np.abs(
-            cell_features(cell_image(image_a, *cell)[top:])
-            - cell_features(cell_image(image_b, *cell)[top:])
+            cell_features(piece_a)
+            - cell_features(piece_b)
         ).mean()
     )
 
 
-def wait_for_move(grab, before, origin, target):
+def wait_for_move(
+    grab,
+    before,
+    origin,
+    target,
+    offset=(0, 0),
+    camera=None
+):
     """
     Espera a que el jugador pase de origin a target.
+
+    camera: mapa del nivel si la cámara puede moverse. Si
+    sigue al jugador, en pantalla el jugador no cambia de
+    lugar: hay que comparar cada casilla del nivel donde
+    está ahora, no donde estaba.
 
     Devuelve False si el tablero sigue igual: la tecla
     se perdió o el movimiento no es posible.
@@ -89,8 +111,10 @@ def wait_for_move(grab, before, origin, target):
 
         frame = grab()
 
-        left = cell_change(before, frame, origin)
-        entered = cell_change(before, frame, target)
+        now = offset if camera is None else camera.offset_of(frame)
+
+        left = cell_change(before, frame, origin, offset, now)
+        entered = cell_change(before, frame, target, offset, now)
 
         if (
             left > LEFT_CELL_CHANGE
@@ -102,7 +126,7 @@ def wait_for_move(grab, before, origin, target):
     return False
 
 
-def wait_until_still(grab, cells):
+def wait_until_still(grab, cells, offset=(0, 0)):
     """
     Espera a que las casillas dejen de cambiar, para no
     pulsar la siguiente flecha en mitad de una animación
@@ -120,7 +144,7 @@ def wait_until_still(grab, cells):
         frame = grab()
 
         if all(
-            cell_change(previous, frame, cell) < STILL_CHANGE
+            cell_change(previous, frame, cell, offset) < STILL_CHANGE
             for cell in cells
         ):
             return
@@ -128,9 +152,9 @@ def wait_until_still(grab, cells):
         previous = frame
 
 
-def inside(image, cell):
+def inside(image, cell, offset=(0, 0)):
 
-    piece = cell_image(image, *cell)
+    piece = view_cell(image, *cell, offset)
 
     return (
         cell[0] >= 0
@@ -140,7 +164,15 @@ def inside(image, cell):
     )
 
 
-def execute_plan(plan, start, grab, step_delay=0.05, on_move=None):
+def execute_plan(
+    plan,
+    start,
+    grab,
+    step_delay=0.05,
+    on_move=None,
+    camera=None,
+    ends_in_exit=True
+):
     """
     Envía los movimientos al juego con las flechas del teclado,
     comprobando en pantalla que cada uno se realizó antes de
@@ -157,6 +189,13 @@ def execute_plan(plan, start, grab, step_delay=0.05, on_move=None):
     "done", "blocked" (el siguiente movimiento no tuvo efecto)
     o "interrupted" (on_move pidió parar).
 
+    camera: mapa del nivel (stitcher.LevelMap) si el nivel no
+    cabe en pantalla. Las casillas se buscan en la vista con su
+    desplazamiento, y tras cada paso se le muestra la captura
+    para seguir a la cámara.
+    ends_in_exit: el último paso entra en la salida y no se
+    comprueba (al explorar sí hay que comprobarlo).
+
     La ventana del juego debe tener el foco.
     Mover el mouse a una esquina de la pantalla aborta
     la ejecución (fail-safe de PyAutoGUI).
@@ -171,7 +210,9 @@ def execute_plan(plan, start, grab, step_delay=0.05, on_move=None):
         target = (pos[0] + dr, pos[1] + dc)
         beyond = (target[0] + dr, target[1] + dc)
 
-        if index == len(plan) - 1:
+        offset = camera.offset if camera is not None else (0, 0)
+
+        if ends_in_exit and index == len(plan) - 1:
             # El último paso entra en la salida y el nivel
             # cambia: no queda tablero que comprobar.
             press(move)
@@ -184,7 +225,7 @@ def execute_plan(plan, start, grab, step_delay=0.05, on_move=None):
 
             press(move)
 
-            if wait_for_move(grab, before, pos, target):
+            if wait_for_move(grab, before, pos, target, offset, camera):
                 break
 
         else:
@@ -195,9 +236,13 @@ def execute_plan(plan, start, grab, step_delay=0.05, on_move=None):
             [
                 cell
                 for cell in (pos, target, beyond)
-                if inside(before, cell)
-            ]
+                if inside(before, cell, offset)
+            ],
+            offset
         )
+
+        if camera is not None:
+            camera.update(grab())
 
         time.sleep(step_delay)
 

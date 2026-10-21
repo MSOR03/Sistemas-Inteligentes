@@ -196,6 +196,20 @@ EXPECTED = {
 # . # # . . . D . #
 # . # D . # # # # #
 # . . . . H H H E #
+""",
+    17: """
+# # # # # # # # # #
+# . . D . S . # K #
+# D # # # # . # B #
+# . B K O B . O . #
+# P # # D # # # D #
+# . S . R . . . . #
+# . S . R . # # # #
+# . # # . # # # O #
+# # # . . R . . . #
+# D # S S # # . D #
+# D G . . D # G # #
+# # # # # # # . E #
 """
 }
 
@@ -213,6 +227,11 @@ def main():
                 / "game_area.png"
             )
         )
+
+        if image is None:
+            print(f"--- Nivel {level}: sin captura, se omite.")
+            print()
+            continue
 
         start = time.perf_counter()
 

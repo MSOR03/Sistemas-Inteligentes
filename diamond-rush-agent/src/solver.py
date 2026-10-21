@@ -18,6 +18,7 @@ from level_reader import (
     RAISED,
     FLOOR,
     UNKNOWN,
+    CHECKPOINT,
     find_cells
 )
 
@@ -74,6 +75,13 @@ FALLBACK_WEIGHT = 2
 
 # En esa segunda búsqueda, costo extra por diamante sin recoger.
 FALLBACK_MISSING_PENALTY = 5
+
+# En los niveles con estatua (checkpoint), la segunda búsqueda
+# estima la distancia a la meta contando cada hueco sin rellenar
+# del camino como esta cantidad de pasos: guía la búsqueda a
+# rellenar justo los huecos que separan al jugador de la meta,
+# en vez de empujar al azar las muchas rocas del nivel.
+FALLBACK_HOLE_COST = 20
 
 
 MOVES = (
@@ -245,8 +253,13 @@ def search(
 
     start = players[0]
 
+    # La estatua (checkpoint) es la meta del nivel y se alcanza
+    # sin necesidad de recoger los diamantes.
+    checkpoints = find_cells(grid, CHECKPOINT)
     exits = find_cells(grid, EXIT)
-    goal = exits[0] if exits else None
+
+    goal = (checkpoints or exits or [None])[0]
+    need_diamonds = not checkpoints
 
     rows = len(grid)
     cols = len(grid[0])
@@ -298,7 +311,59 @@ def search(
 
     all_diamonds = (1 << len(diamonds)) - 1
 
-    def heuristic(pos, collected):
+    # {huecos rellenados: {casilla: distancia a la meta}}
+    goal_distances = {}
+
+    def distances_to_goal(filled):
+        """
+        Dijkstra desde la meta ignorando rocas, rejas y
+        puertas; cada hueco sin rellenar cuesta
+        FALLBACK_HOLE_COST pasos.
+        """
+
+        if filled in goal_distances:
+            return goal_distances[filled]
+
+        distance = {goal: 0}
+        heap = [(0, goal)]
+
+        while heap:
+
+            d, (r, c) = heapq.heappop(heap)
+
+            if d > distance[(r, c)]:
+                continue
+
+            for _, dr, dc in MOVES:
+
+                cell = (r + dr, c + dc)
+
+                if not (0 <= cell[0] < rows and 0 <= cell[1] < cols):
+                    continue
+
+                if grid[cell[0]][cell[1]] in BLOCKED:
+                    continue
+
+                step_cost = 1
+
+                if cell in holes and not filled & holes[cell]:
+                    step_cost = FALLBACK_HOLE_COST
+
+                if d + step_cost < distance.get(cell, float("inf")):
+                    distance[cell] = d + step_cost
+                    heapq.heappush(heap, (d + step_cost, cell))
+
+        goal_distances[filled] = distance
+
+        return distance
+
+    def heuristic(pos, collected, filled):
+
+        if not need_diamonds and missing_penalty:
+            return distances_to_goal(filled).get(
+                pos,
+                manhattan(pos, goal)
+            )
 
         missing = [
             cell
@@ -306,7 +371,7 @@ def search(
             if not collected & bit
         ]
 
-        if not missing:
+        if not missing or not need_diamonds:
             return manhattan(pos, goal) if goal else 0
 
         # Empuja la búsqueda hacia estados con más diamantes
@@ -551,7 +616,8 @@ def search(
 
         return new_cost + weight * heuristic(
             state[0],
-            state[1]
+            state[1],
+            state[7]
         )
 
     start_state = (

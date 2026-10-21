@@ -28,6 +28,10 @@ PLATE = "O"
 GATE = "B"
 RAISED = "X"
 
+# Estatua dorada: meta del nivel, como la salida,
+# pero no exige recoger los diamantes.
+CHECKPOINT = "C"
+
 # Hueco ya rellenado con una roca: el clasificador
 # lo distingue, pero en el tablero es piso normal.
 FILLED = "f"
@@ -48,6 +52,7 @@ SYMBOLS = {
     "ROCK": ROCK,
     "PLATE": PLATE,
     "GATE": GATE,
+    "CHECKPOINT": CHECKPOINT,
     "FILLED": FILLED
 }
 
@@ -64,8 +69,14 @@ GRID_Y0 = Y0 - CELL_HEIGHT
 # Primera línea visible de las celdas de esa fila.
 TOP_ROW_VISIBLE_FROM = 21
 
-# Lo único que se intenta distinguir en la fila tapada.
-TOP_ROW_SYMBOLS = (WALL, FLOOR, DIAMOND)
+# Lo único que se intenta distinguir en la fila tapada
+# (los huecos se detectan aparte, ver TOP_ROW_HOLE_GRAY_PIXELS).
+TOP_ROW_SYMBOLS = (WALL, FLOOR, DIAMOND, ROCK)
+
+# En la fila tapada solo se cuentan los grises de la franja
+# visible: las hojas del HUD sí son grisáceas. Hueco >= 241,
+# piso <= 0 en esa franja.
+TOP_ROW_HOLE_GRAY_PIXELS = 120
 
 
 # ----------------------------------------------------
@@ -300,6 +311,14 @@ def classify_cell(cell, prepared, top_row=False):
             best_symbol = UNKNOWN
 
     if top_row:
+
+        if (
+            best_symbol == FLOOR
+            and count_gray_pixels(cell[TOP_ROW_VISIBLE_FROM - 4:])
+            >= TOP_ROW_HOLE_GRAY_PIXELS
+        ):
+            best_symbol = HOLE
+
         return best_symbol, best_distance
 
     if best_symbol == FILLED:

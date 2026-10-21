@@ -157,6 +157,56 @@ FILLED_ROCK_DARK_PIXELS = 90
 # libre más parecida, siempre que no supere esta distancia.
 PLAYER_FALLBACK_DISTANCE = 45
 
+# Antes de esa distancia se busca el jugador con su template a
+# resolución completa. Si el navegador dibuja el juego más chico
+# (pantalla de 1366x768: escala 0.75) y la captura se agranda,
+# la imagen queda borrosa: la miniatura del jugador se aleja de
+# su template más que un piso, y la celda de arriba, donde solo
+# asoma el sombrero, se parece más que la suya. Comparar a
+# resolución completa no se confunde: el jugador da >= 0.89 y
+# cualquier otra celda <= 0.48. Se prueban también los templates
+# reflejados, porque el jugador mira hacia ambos lados.
+PLAYER_MATCH_SCORE = 0.7
+
+# Margen alrededor de la celda donde se busca el template:
+# el sombrero asoma por encima de la casilla.
+PLAYER_MATCH_MARGIN = 10
+
+
+def player_match_score(game_image, row, col, templates):
+    """
+    Mejor coincidencia (TM_CCOEFF_NORMED) de los templates del
+    jugador alrededor de la celda (row, col).
+    """
+
+    y = GRID_Y0 + row * CELL_HEIGHT
+    x = X0 + col * CELL_WIDTH
+
+    window = game_image[
+        max(y - PLAYER_MATCH_MARGIN, 0):y + CELL_HEIGHT + PLAYER_MATCH_MARGIN,
+        max(x - PLAYER_MATCH_MARGIN, 0):x + CELL_WIDTH + PLAYER_MATCH_MARGIN
+    ]
+
+    best = -1.0
+
+    for template in templates:
+
+        if (
+            window.shape[0] < template.shape[0]
+            or window.shape[1] < template.shape[1]
+        ):
+            continue
+
+        result = cv2.matchTemplate(
+            window,
+            template,
+            cv2.TM_CCOEFF_NORMED
+        )
+
+        best = max(best, float(cv2.minMaxLoc(result)[1]))
+
+    return best
+
 
 def base_label(label):
     """
@@ -528,6 +578,31 @@ def read_level(game_image, prepared, seen=None):
         grid.append(row)
 
         y += CELL_HEIGHT
+
+    if candidates and not find_cells(grid, PLAYER):
+
+        player_images = [
+            image
+            for symbol, _, _, image in prepared
+            if symbol == PLAYER
+        ]
+
+        player_images += [
+            cv2.flip(image, 1)
+            for image in player_images
+        ]
+
+        score, r, c = max(
+            (
+                player_match_score(game_image, r, c, player_images),
+                r,
+                c
+            )
+            for _, r, c in candidates
+        )
+
+        if score >= PLAYER_MATCH_SCORE:
+            grid[r][c] = PLAYER
 
     if candidates and not find_cells(grid, PLAYER):
 

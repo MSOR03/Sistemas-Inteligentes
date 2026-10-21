@@ -117,11 +117,69 @@ def find_scale(image, template_path):
     return max(fine, key=fine_score)
 
 
-def locate_game_area(image, template_path):
+# Píxeles que se busca el ancla alrededor de su posición anterior.
+HINT_MARGIN = 20
+
+
+def locate_near_hint(image, template_path, hint):
+    """
+    Busca el ancla solo alrededor del área de juego anterior
+    (hint), con su misma escala. Devuelve el área o None si
+    el ancla ya no está ahí.
+    """
+
+    scale = hint["scale"]
+
+    scaled = scaled_image(image, scale)
+
+    anchor_x = hint["x"] - GAME_OFFSET_X
+    anchor_y = hint["y"] - GAME_OFFSET_Y
+
+    h, w = load_template(template_path).shape[:2]
+
+    left = max(anchor_x - HINT_MARGIN, 0)
+    top = max(anchor_y - HINT_MARGIN, 0)
+
+    window = scaled[
+        top:anchor_y + h + HINT_MARGIN,
+        left:anchor_x + w + HINT_MARGIN
+    ]
+
+    if window.shape[0] < h or window.shape[1] < w:
+        return None
+
+    anchor = locate_anchor(window, template_path)
+
+    if anchor is None:
+        return None
+
+    return {
+        "x": left + anchor["x"] + GAME_OFFSET_X,
+        "y": top + anchor["y"] + GAME_OFFSET_Y,
+        "width": GAME_WIDTH,
+        "height": GAME_HEIGHT,
+        "confidence": anchor["confidence"],
+        "scale": scale
+    }
+
+
+def locate_game_area(image, template_path, hint=None):
     """
     Devuelve el área del juego en coordenadas de la pantalla
     escalada por "scale"; crop_game aplica ese mismo escalado.
+
+    hint: área encontrada antes. Si el juego no se movió, el
+    ancla se busca solo alrededor de ella y con su escala: con
+    el juego a otra escala (pantalla de 1366x768), find_scale
+    tarda ~9 s y esto unos milisegundos.
     """
+
+    if hint is not None:
+
+        area = locate_near_hint(image, template_path, hint)
+
+        if area is not None:
+            return area
 
     scale = 1.0
 

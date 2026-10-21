@@ -80,6 +80,11 @@ LAST_MAP = (
 GATE_ANIMATION = config.GATE_ANIMATION
 
 
+# Última área de juego encontrada: entre un nivel y otro el juego
+# no se mueve, así que se busca primero ahí.
+_last_game_area = None
+
+
 def capture_game():
     """
     Captura la pantalla y recorta el área del juego.
@@ -89,6 +94,8 @@ def capture_game():
     si el juego no está en pantalla.
     """
 
+    global _last_game_area
+
     # Import diferido: el modo --image no necesita pantalla.
     from capture import capture_region, capture_screen
 
@@ -96,8 +103,11 @@ def capture_game():
 
     game_area = locate_game_area(
         screen,
-        str(ANCHOR_TEMPLATE)
+        str(ANCHOR_TEMPLATE),
+        hint=_last_game_area
     )
+
+    _last_game_area = game_area
 
     if game_area is None:
 

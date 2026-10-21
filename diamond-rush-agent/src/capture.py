@@ -21,22 +21,87 @@ def capture_screen():
 
 _display = None
 
+# Captura con mss: copia solo el rectángulo pedido. PIL.ImageGrab
+# en Windows captura la pantalla entera y después recorta, así que
+# tarda lo mismo que una captura completa (~33 ms contra ~17 ms con
+# mss en una pantalla de 1920x1080). Las dos dan los mismos píxeles
+# en las mismas coordenadas (pyautogui deja el proceso con DPI
+# real). Si mss no está instalado o falla, se usa PIL.ImageGrab.
+_mss = None
+_mss_failed = False
+
 
 def capture_region(x, y, width, height):
     """
     Captura un rectángulo de la pantalla como imagen BGR.
 
     Es rápida, así que sirve para vigilar el juego mientras
-    se ejecuta un plan. En Linux va directo a X11; en
-    Windows y macOS usa PIL.ImageGrab, la misma función que
-    usa pyautogui.screenshot(), así las coordenadas coinciden
-    con las de capture_screen().
+    se ejecuta un plan: se llama muchas veces por movimiento.
+    En Linux va directo a X11; en Windows y macOS usa mss si
+    está, y si no PIL.ImageGrab, la misma función que usa
+    pyautogui.screenshot(), así las coordenadas coinciden con
+    las de capture_screen().
     """
 
-    if not sys.platform.startswith("linux"):
-        return _capture_region_imagegrab(x, y, width, height)
+    global _mss_failed
 
-    return _capture_region_x11(x, y, width, height)
+    if sys.platform.startswith("linux"):
+        return _capture_region_x11(x, y, width, height)
+
+    if not _mss_failed:
+
+        try:
+            return _capture_region_mss(x, y, width, height)
+        except Exception as error:
+            _mss_failed = True
+            print(
+                f"AVISO: captura rápida (mss) no disponible ({error}); "
+                f"uso PIL.ImageGrab, más lenta."
+            )
+
+    return _capture_region_imagegrab(x, y, width, height)
+
+
+def _capture_region_mss(x, y, width, height):
+
+    global _mss
+
+    if _mss is None:
+
+        import mss
+
+        # mss 10 renombró la clase; las versiones anteriores
+        # solo tienen mss.mss.
+        factory = getattr(mss, "MSS", None) or mss.mss
+        _mss = factory()
+
+    screen = _mss.monitors[0]
+
+    # La parte que quede fuera de la pantalla se deja en negro.
+    left = max(x, screen["left"])
+    top = max(y, screen["top"])
+    right = min(x + width, screen["left"] + screen["width"])
+    bottom = min(y + height, screen["top"] + screen["height"])
+
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+
+    if right <= left or bottom <= top:
+        return image
+
+    shot = _mss.grab({
+        "left": left,
+        "top": top,
+        "width": right - left,
+        "height": bottom - top
+    })
+
+    # mss entrega BGRA: basta con quitar el canal alfa.
+    image[
+        top - y:bottom - y,
+        left - x:right - x
+    ] = np.asarray(shot)[:, :, :3]
+
+    return image
 
 
 def _capture_region_imagegrab(x, y, width, height):

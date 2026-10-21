@@ -1,5 +1,7 @@
 import cv2
 
+from image_io import read_image
+
 
 GAME_OFFSET_X = -28
 GAME_OFFSET_Y = -39
@@ -8,17 +10,37 @@ GAME_WIDTH = 452
 GAME_HEIGHT = 638
 
 
+_templates = {}
+
+
+def load_template(template_path):
+    """
+    Lee el template una sola vez: find_scale lo usa en cada
+    escala que prueba.
+    """
+
+    template = _templates.get(template_path)
+
+    if template is None:
+
+        template = read_image(template_path)
+
+        if template is None:
+            raise FileNotFoundError(
+                f"No se encontró el template: {template_path}"
+            )
+
+        _templates[template_path] = template
+
+    return template
+
+
 def locate_anchor(
     image,
     template_path,
     threshold=0.80
 ):
-    template = cv2.imread(template_path)
-
-    if template is None:
-        raise FileNotFoundError(
-            f"No se encontró el template: {template_path}"
-        )
+    template = load_template(template_path)
 
     result = cv2.matchTemplate(
         image,
@@ -64,12 +86,7 @@ def find_scale(image, template_path):
     1.5 si el navegador está con zoom al 67%).
     """
 
-    template = cv2.imread(template_path)
-
-    if template is None:
-        raise FileNotFoundError(
-            f"No se encontró el template: {template_path}"
-        )
+    template = load_template(template_path)
 
     def coarse_score(scale):
         # Encoger el template es mucho más barato

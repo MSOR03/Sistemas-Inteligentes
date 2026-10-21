@@ -1,5 +1,6 @@
 import cv2
 import os
+from image_io import read_image
 
 
 def load_templates(template_dir):
@@ -22,7 +23,7 @@ def load_templates(template_dir):
             filename
         )
 
-        image = cv2.imread(path)
+        image = read_image(path)
 
         if image is None:
             continue

@@ -1,9 +1,11 @@
 import argparse
+import sys
 import time
 from pathlib import Path
 
 import cv2
 
+import config
 from agent import DiamondRushAgent
 from game_detector import (
     GAME_HEIGHT,
@@ -22,6 +24,7 @@ from level_reader import (
     format_grid
 )
 from explorer import MAX_EXPLORE_MOVES, cell_after, frontier
+from image_io import read_image, write_image
 from solver import format_plan, keys_in_hand_after
 from stitcher import LevelMap
 
@@ -73,8 +76,8 @@ LAST_MAP = (
 )
 
 
-# Segundos que tarda una reja en abrirse o cerrarse.
-GATE_ANIMATION = 0.4
+# Segundos que tarda una reja en abrirse o cerrarse (ver config.py).
+GATE_ANIMATION = config.GATE_ANIMATION
 
 
 def capture_game():
@@ -110,7 +113,7 @@ def capture_game():
             exist_ok=True
         )
 
-        cv2.imwrite(str(DEBUG_SCREEN), screen)
+        write_image(str(DEBUG_SCREEN), screen)
 
         print(
             f"Pantalla capturada: {screen.shape[1]}x{screen.shape[0]}. "
@@ -129,8 +132,8 @@ def capture_game():
         exist_ok=True
     )
 
-    cv2.imwrite(str(LAST_GAME), game)
-    cv2.imwrite(str(LAST_SCREEN), screen)
+    write_image(str(LAST_GAME), game)
+    write_image(str(LAST_SCREEN), screen)
 
     # El área está en coordenadas de la pantalla escalada.
     scale = game_area["scale"]
@@ -173,7 +176,7 @@ def save_unknown_cells(game, grid):
 
     for row, col in cells:
 
-        cv2.imwrite(
+        write_image(
             str(
                 UNKNOWN_DIR
                 / f"{stamp}_r{row:02d}_c{col:02d}.png"
@@ -204,8 +207,14 @@ def explore_level(agent, game, grab, args):
     Si el nivel sigue fuera de la pantalla, pasea al jugador
     para que la cámara lo muestre entero y arma su mapa.
 
+    Solo explora con --explore: en Diamond Rush el nivel entero
+    cabe en pantalla, y si falta la salida lo más probable es que
+    sea un objeto sin template. Explorar empujaría rocas y podría
+    dejar el nivel sin solución; sin explorar, el agente se detiene
+    y basta con agregar el template.
+
     Devuelve (mapa, casilla del jugador en su tablero, llaves
-    en la mano), o (None, None, 0) si el nivel cabe en pantalla.
+    en la mano), o (None, None, 0) si no se explora.
     """
 
     from explorer import map_level
@@ -223,6 +232,14 @@ def explore_level(agent, game, grab, args):
         or not players
         or find_cells(grid, EXIT)
     ):
+        return None, None, 0
+
+    if not args.explore:
+        print(
+            "No veo la salida y el nivel podría seguir fuera de la "
+            "pantalla. Si es así, vuelve a correr con --explore; si "
+            "no, la salida es un objeto sin template."
+        )
         return None, None, 0
 
     print()
@@ -269,7 +286,11 @@ def plan_level(
     player: casilla conocida del jugador al replanificar.
     """
 
+    start = time.perf_counter()
+
     plan = agent.compute(percept, keys_in_hand, replanning, player)
+
+    elapsed = time.perf_counter() - start
 
     print()
     print(format_grid(agent.grid))
@@ -291,19 +312,89 @@ def plan_level(
     # Sin salida el solver solo pide los diamantes visibles: con
     # ninguno a la vista, el plan vacío daría el nivel por ganado.
     if not find_cells(agent.grid, EXIT):
-        print("No se ve la salida: falta ver parte del nivel.")
+        print(
+            "No se ve la salida: puede ser un objeto sin template "
+            "(revisa screenshots/last_game.png)."
+        )
         return None
 
     if plan is None:
-        print("No se encontró solución para este tablero.")
+        print(
+            f"No se encontró solución para este tablero "
+            f"(busqué {elapsed:.2f} s)."
+        )
         return None
 
     print(
-        f"Plan ({len(plan)} movimientos): "
+        f"Plan ({len(plan)} movimientos, calculado en {elapsed:.2f} s): "
         f"{format_plan(plan)}"
     )
 
     return plan
+
+
+class LevelTimer:
+    """
+    Tiempos de un nivel: leer la pantalla y planificar, mover
+    al jugador con el teclado, y el total desde que se empezó a
+    mirar el nivel hasta enviar el último movimiento.
+    """
+
+    def __init__(self):
+
+        self.start = time.perf_counter()
+        self.thinking = 0.0
+        self.playing = 0.0
+        self.moves = 0
+        self.replans = 0
+
+    def think(self, seconds):
+        self.thinking += seconds
+
+    def play(self, seconds, moves):
+        self.playing += seconds
+        self.moves += moves
+
+    def total(self):
+        return time.perf_counter() - self.start
+
+    def report(self, level, finished=True):
+
+        outcome = "terminado" if finished else "sin terminar"
+
+        print()
+        print(f"=== Nivel {level} {outcome} ===")
+        print(f"  Lectura y plan:  {self.thinking:7.2f} s")
+        print(
+            f"  Teclado:         {self.playing:7.2f} s "
+            f"({self.moves} movimientos"
+            + (
+                f", {self.playing / self.moves:.2f} s por movimiento)"
+                if self.moves else ")"
+            )
+        )
+        print(f"  Replanificaciones: {self.replans}")
+        print(f"  Total:           {self.total():7.2f} s")
+
+
+def print_summary(timers):
+    """
+    Resumen de todos los niveles jugados, si fue más de uno.
+    """
+
+    if len(timers) < 2:
+        return
+
+    thinking = sum(timer.thinking for timer in timers)
+    playing = sum(timer.playing for timer in timers)
+    total = sum(timer.total() for timer in timers)
+    moves = sum(timer.moves for timer in timers)
+
+    print()
+    print(f"=== {len(timers)} niveles ===")
+    print(f"  Lectura y plan:  {thinking:7.2f} s")
+    print(f"  Teclado:         {playing:7.2f} s ({moves} movimientos)")
+    print(f"  Total:           {total:7.2f} s")
 
 
 def play(args):
@@ -321,6 +412,9 @@ def play(args):
 
     solved = 0
     replans = 0
+
+    # Tiempos de cada nivel jugado (el último puede estar en curso).
+    timers = []
 
     # El nivel ya está empezado (se replanifica sobre él).
     started = False
@@ -340,17 +434,29 @@ def play(args):
 
     while solved < args.levels:
 
+        if not started:
+            timers.append(LevelTimer())
+
+        timer = timers[-1]
+
+        thinking_since = time.perf_counter()
+
         if level_map is None:
 
             captured = capture_game()
 
             if captured is None:
                 print("ERROR: no se encontró Diamond Rush en pantalla.")
+                timers.pop()
+                print_summary(timers)
                 return
 
             game, grab = captured
 
         if not started:
+
+            # Explorar mueve al jugador: cuenta como teclado.
+            exploring_since = time.perf_counter()
 
             level_map, player, keys_in_hand = explore_level(
                 agent,
@@ -358,6 +464,11 @@ def play(args):
                 grab,
                 args
             )
+
+            if level_map is not None:
+                exploring = time.perf_counter() - exploring_since
+                timer.play(exploring, 0)
+                thinking_since += exploring
 
         elif level_map is not None:
 
@@ -371,7 +482,11 @@ def play(args):
             player=player
         )
 
+        timer.think(time.perf_counter() - thinking_since)
+
         if plan is None:
+            timer.report(solved + 1, finished=False)
+            print_summary(timers)
             return
 
         if args.dry_run:
@@ -403,14 +518,19 @@ def play(args):
 
         start = find_cells(agent.grid, PLAYER)[0]
 
+        playing_since = time.perf_counter()
+
         done, status = execute_plan(
             plan,
             start,
             grab,
             args.delay,
             watch_plates,
-            camera=level_map
+            camera=level_map,
+            grid=agent.grid
         )
+
+        timer.play(time.perf_counter() - playing_since, done)
 
         if status != "done":
 
@@ -421,6 +541,9 @@ def play(args):
             )
 
             player = cell_after(start, plan[:done])
+
+        if status != "done":
+            timer.replans += 1
 
         if status == "interrupted":
 
@@ -457,11 +580,15 @@ def play(args):
                     "El juego no está recibiendo las teclas "
                     "o el tablero se leyó mal."
                 )
+                timer.report(solved + 1, finished=False)
+                print_summary(timers)
                 return
 
             replans += 1
 
             if replans > args.replans:
+                timer.report(solved + 1, finished=False)
+                print_summary(timers)
                 return
 
             print("Vuelvo a leer el tablero y a planificar...")
@@ -469,6 +596,10 @@ def play(args):
 
         solved += 1
         replans = 0
+
+        # Se mide hasta enviar el último movimiento (la entrada a
+        # la salida), sin la animación de fin de nivel.
+        timer.report(solved)
         started = False
         keys_in_hand = 0
         player = None
@@ -478,10 +609,20 @@ def play(args):
             # Esperar la transición al siguiente nivel.
             time.sleep(args.level_wait)
 
+    print_summary(timers)
     print("Listo.")
 
 
 def main():
+
+    # Una consola que no puede mostrar algún carácter (tildes,
+    # en una terminal con otra codificación) no debe tumbar al
+    # agente en pleno nivel: se reemplaza el carácter y listo.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
     parser = argparse.ArgumentParser(
         description="Agente que juega Diamond Rush."
@@ -501,22 +642,28 @@ def main():
     parser.add_argument(
         "--levels",
         type=int,
-        default=1,
-        help="Cantidad de niveles consecutivos a jugar"
+        default=config.LEVELS,
+        help="Cantidad de niveles consecutivos a jugar (DR_LEVELS)"
     )
 
     parser.add_argument(
         "--delay",
         type=float,
-        default=0.05,
-        help="Pausa extra tras comprobar cada movimiento"
+        default=config.STEP_DELAY,
+        help="Pausa extra tras comprobar cada movimiento (DR_STEP_DELAY)"
     )
 
     parser.add_argument(
         "--replans",
         type=int,
-        default=6,
-        help="Veces que se replanifica si un movimiento falla"
+        default=config.REPLANS,
+        help="Veces que se replanifica si un movimiento falla (DR_REPLANS)"
+    )
+
+    parser.add_argument(
+        "--explore",
+        action="store_true",
+        help="Explorar los niveles que no se ven enteros (puede empujar rocas)"
     )
 
     parser.add_argument(
@@ -529,22 +676,22 @@ def main():
     parser.add_argument(
         "--countdown",
         type=float,
-        default=4,
-        help="Segundos para dar foco a la ventana del juego"
+        default=config.COUNTDOWN,
+        help="Segundos para dar foco a la ventana del juego (DR_COUNTDOWN)"
     )
 
     parser.add_argument(
         "--level-wait",
         type=float,
-        default=4,
-        help="Segundos de espera entre un nivel y el siguiente"
+        default=config.LEVEL_WAIT,
+        help="Segundos de espera entre un nivel y el siguiente (DR_LEVEL_WAIT)"
     )
 
     args = parser.parse_args()
 
     if args.image:
 
-        game = cv2.imread(args.image)
+        game = read_image(args.image)
 
         if game is None:
             print(f"No se pudo leer la imagen: {args.image}")

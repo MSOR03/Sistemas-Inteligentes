@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from image_io import read_image, write_image
 
 from board_classifier import (
     X0,
@@ -80,7 +81,7 @@ def button_template():
     global _button
 
     if _button is None:
-        _button = cv2.imread(str(BUTTON_TEMPLATE))
+        _button = read_image(str(BUTTON_TEMPLATE))
 
     return _button
 
@@ -433,4 +434,4 @@ class LevelMap:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        cv2.imwrite(str(path), self.image())
+        write_image(str(path), self.image())

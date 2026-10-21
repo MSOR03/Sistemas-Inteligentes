@@ -1,5 +1,6 @@
-import cv2
 import os
+
+from image_io import write_image
 
 
 def extract_cells(
@@ -36,7 +37,7 @@ def extract_cells(
                 f"r{row:02d}_c{col:02d}.png"
             )
 
-            cv2.imwrite(
+            write_image(
                 os.path.join(
                     output_dir,
                     filename

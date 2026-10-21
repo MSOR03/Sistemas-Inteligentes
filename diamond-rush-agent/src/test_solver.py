@@ -1,11 +1,11 @@
+import sys
 import time
 from pathlib import Path
 
-import cv2
-
 from agent import DiamondRushAgent
+from image_io import read_image
 from level_reader import format_grid
-from solver import format_plan
+from solver import format_plan, solve
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -214,13 +214,50 @@ EXPECTED = {
 }
 
 
+# Niveles sin captura guardada: solo se prueba el planificador.
+# Nivel 20: la meta es la estatua (E), encerrada tras tres huecos;
+# hay que rellenarlos con rocas. Nivel 13: llaves, puertas y reja.
+SOLVER_ONLY = {
+    13: """
+# # # # # # # # # #
+# D D . S . D . K #
+# D # S # # G # # #
+# # # . . D . . . #
+# D # . # R # # S #
+# . S K B O . . D #
+# . # . # # . # # #
+# D # S # S . # S #
+# . # . # D . S E #
+# G # S # # S # # #
+# . . D P . . D . #
+# # # # # # # # # #
+""",
+    20: """
+# . . . R . . R . #
+# # R # # . . P . #
+# # . . . R . . . #
+# . . R . H H # # #
+# R . . R # R R # #
+# # # # H # . R . #
+# H H H R R H . . #
+# E # # H R # # . #
+# # # . . R # . . #
+# . . . . H R R R #
+# . H R R # . . . #
+# R . . . # . R . #
+"""
+}
+
+
 def main():
 
     agent = DiamondRushAgent()
 
+    errors = 0
+
     for level, expected in EXPECTED.items():
 
-        image = cv2.imread(
+        image = read_image(
             str(
                 RAW_DIR
                 / f"level_{level:03d}"
@@ -257,6 +294,36 @@ def main():
 
         print()
 
+        errors += board != expected.strip()
+        errors += plan is None
+
+    for level, board in SOLVER_ONLY.items():
+
+        grid = [line.split() for line in board.strip().splitlines()]
+
+        start = time.perf_counter()
+
+        plan, _ = solve(grid)
+
+        elapsed = time.perf_counter() - start
+
+        print(f"--- Nivel {level}, solo planificador ({elapsed:.2f}s)")
+
+        if plan is None:
+            print("ERROR: sin solución.")
+            errors += 1
+        else:
+            print(
+                f"Plan ({len(plan)} movimientos): "
+                f"{format_plan(plan)}"
+            )
+
+        print()
+
+    print("Todo bien." if not errors else f"{errors} errores.")
+
+    return errors
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(1 if main() else 0)

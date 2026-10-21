@@ -8,6 +8,7 @@ from level_reader import (
     PLATE,
     PLAYER,
     ROCK,
+    WALL,
     find_cells,
     format_grid,
     prepare_templates,
@@ -71,7 +72,7 @@ class DiamondRushAgent:
 
         if self.knowledge_file.exists():
             self.knowledge = json.loads(
-                self.knowledge_file.read_text()
+                self.knowledge_file.read_text(encoding="utf-8")
             )
 
     def perceive(self, percept):
@@ -119,8 +120,30 @@ class DiamondRushAgent:
 
         player: casilla donde el controlador vio llegar al
         jugador. Es más fiable que reconocerlo en la imagen
-        (su animación no siempre coincide con los templates).
+        (su animación no siempre coincide con los templates),
+        salvo que la imagen muestre algo imposible ahí.
+
+        Devuelve la casilla del jugador que se usó.
         """
+
+        if player is not None:
+
+            seen = find_cells(grid, PLAYER)
+
+            # El jugador nunca está sobre una roca ni un muro: si
+            # ahí se ve uno, el controlador perdió la cuenta (un
+            # movimiento que creyó hecho no se hizo). Si el jugador
+            # se ve claramente en otra casilla, vale esa.
+            if (
+                grid[player[0]][player[1]] in (ROCK, WALL)
+                and len(seen) == 1
+            ):
+                print(
+                    f"AVISO: el jugador no está en {player} (ahí se "
+                    f"ve una roca o un muro); lo veo en {seen[0]}."
+                )
+
+                player = seen[0]
 
         # Una placa vacía se lee como placa: si en una placa
         # conocida se lee piso, es una roca encima (con el borde
@@ -138,6 +161,8 @@ class DiamondRushAgent:
                 )
 
             grid[player[0]][player[1]] = PLAYER
+
+        return player
 
     def compute(
         self,
@@ -269,5 +294,6 @@ class DiamondRushAgent:
 
         if self.learned:
             self.knowledge_file.write_text(
-                json.dumps(self.knowledge, indent=2)
+                json.dumps(self.knowledge, indent=2),
+                encoding="utf-8"
             )

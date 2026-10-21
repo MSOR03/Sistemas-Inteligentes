@@ -62,7 +62,10 @@ MAX_LINK_OPTIONS = 60
 # Debajo de una roca puede haber púas que no se ven hasta
 # moverla. Por cautela se planifica como si cada casilla que
 # empieza con una roca fuera una trampa de un solo uso.
-CAUTIOUS_EXPANSIONS = 100_000
+# Si con cautela no sale pronto, casi nunca sale: en los niveles
+# guardados ningún plan cambia aun con 10 000, y con 100 000 se
+# perdían hasta 9 s (nivel 10 a medias) antes de rendirse.
+CAUTIOUS_EXPANSIONS = 30_000
 
 # Límite de expansiones (regiones, ver explore) antes de rendirse.
 MAX_EXPANSIONS = 400_000
@@ -88,7 +91,9 @@ RELAXED_ROCK_COST = 2
 
 # Peso de cada casilla que le falta recorrer a una roca hasta su
 # hueco, y costo de un hueco al que ya no puede llegar ninguna.
-HOLE_ROCK_WEIGHT = 3
+# Con 5 el nivel 20 sale en ~8 s (con 3, ~22 s) y el plan no
+# empeora (108 movimientos).
+HOLE_ROCK_WEIGHT = 5
 HOLE_WITHOUT_ROCK = 30
 
 
@@ -321,6 +326,34 @@ def search(
 
     all_diamonds = (1 << len(diamonds)) - 1
 
+    # Casillas donde entrar no cambia nada del nivel (si no hay
+    # una roca encima): piso, placas y el inicio. explore()
+    # recorre estas sin pasar por step(), que es lo más caro de
+    # la búsqueda; el resultado es el mismo.
+    plain = {
+        (r, c)
+        for r in range(rows)
+        for c in range(cols)
+        if grid[r][c] in (FLOOR, PLAYER, PLATE)
+        and (r, c) not in spikes
+        and (r, c) != goal
+    }
+
+    # Vecinos de cada casilla a los que se puede intentar entrar:
+    # (movimiento, fila, columna, vecino). Los muros no cambian
+    # nunca, así que no vale la pena preguntarle a step().
+    neighbors = {
+        (r, c): [
+            (name, dr, dc, (r + dr, c + dc))
+            for name, dr, dc in MOVES
+            if 0 <= r + dr < rows
+            and 0 <= c + dc < cols
+            and grid[r + dr][c + dc] not in BLOCKED
+        ]
+        for r in range(rows)
+        for c in range(cols)
+    }
+
     def passable(cell):
 
         return (
@@ -422,7 +455,13 @@ def search(
 
     if missing_penalty and goal and holes:
         needed_holes = [
-            (hole, push_distances(hole))
+            (
+                hole,
+                sorted(
+                    push_distances(hole).items(),
+                    key=lambda item: (item[1], item[0])
+                )
+            )
             for hole in holes_on_the_way()
         ]
 
@@ -435,24 +474,22 @@ def search(
         free = set(rocks)
         total = 0
 
-        for hole, distance in needed_holes:
+        for hole, by_distance in needed_holes:
 
             if filled & holes[hole]:
                 continue
 
-            options = [
-                (distance[rock], rock)
-                for rock in free
-                if rock in distance
-            ]
+            # by_distance está ordenado: la primera roca libre
+            # es la más cercana.
+            for rock, steps in by_distance:
 
-            if not options:
+                if rock in free:
+                    free.discard(rock)
+                    total += HOLE_ROCK_WEIGHT * steps
+                    break
+
+            else:
                 total += HOLE_WITHOUT_ROCK
-                continue
-
-            steps, rock = min(options)
-            free.discard(rock)
-            total += HOLE_ROCK_WEIGHT * steps
 
         return total
 
@@ -652,9 +689,11 @@ def search(
         caminando sin que cambie nada más en el nivel.
 
         Devuelve (región, acciones). Cada acción es
-        (movimientos, estado): el camino hasta el borde de
+        (largo, camino, estado): el camino hasta el borde de
         la región más el paso que sí cambia el nivel (empujar
         una roca, abrir una puerta, gastar una trampa...).
+        El camino se guarda sin armar (ver route_moves): solo
+        hace falta escribirlo para el plan final.
 
         Buscar sobre estas acciones, y no paso a paso, es lo
         que permite resolver niveles largos: dos posiciones
@@ -662,29 +701,57 @@ def search(
         """
 
         rest = state[1:]
+        rocks = state[6]
+        filled = state[7]
 
         previous = {state[0]: None}
-        queue = deque([state])
+        depth = {state[0]: 0}
+        queue = deque([state[0]])
 
         actions = []
 
-        def path_to(pos, last):
-
-            path = [last]
-
-            while previous[pos] is not None:
-                pos, name = previous[pos]
-                path.append(name)
-
-            path.reverse()
-
-            return path
-
         while queue:
 
-            current = queue.popleft()
+            pos = queue.popleft()
 
-            for name, dr, dc in MOVES:
+            # Al salir de una trampa las púas suben: eso sí
+            # cambia el nivel y lo tiene que ver step().
+            leaving_spike = SPIKES_SINGLE_USE and pos in spikes
+
+            current = None
+
+            for name, dr, dc, target in neighbors[pos]:
+
+                if target in rocks:
+                    pass
+
+                elif target in holes:
+
+                    # Un hueco sin rellenar no se puede pisar; uno
+                    # rellenado es piso como cualquier otro.
+                    if not filled & holes[target]:
+                        continue
+
+                    if not leaving_spike:
+
+                        if target not in previous:
+                            previous[target] = (pos, name)
+                            depth[target] = depth[pos] + 1
+                            queue.append(target)
+
+                        continue
+
+                elif not leaving_spike and target in plain:
+
+                    if target not in previous:
+                        previous[target] = (pos, name)
+                        depth[target] = depth[pos] + 1
+                        queue.append(target)
+
+                    continue
+
+                if current is None:
+                    current = (pos,) + rest
 
                 following = step(current, dr, dc)
 
@@ -696,12 +763,17 @@ def search(
                 if changed == rest and following[0] != goal:
 
                     if following[0] not in previous:
-                        previous[following[0]] = (current[0], name)
-                        queue.append(following)
+                        previous[following[0]] = (pos, name)
+                        depth[following[0]] = depth[pos] + 1
+                        queue.append(following[0])
 
                     continue
 
-                action = (path_to(current[0], name), following)
+                action = (
+                    depth[pos] + 1,
+                    (previous, pos, name),
+                    following
+                )
 
                 if (
                     missing_penalty
@@ -767,15 +839,15 @@ def search(
         if expansions > max_expansions:
             return None, False
 
-        for path, next_state in actions:
+        for length, route, next_state in actions:
 
-            new_cost = cost[state] + len(path)
+            new_cost = cost[state] + length
 
             if new_cost >= cost.get(next_state, float("inf")):
                 continue
 
             cost[next_state] = new_cost
-            parents[next_state] = (state, path)
+            parents[next_state] = (state, route)
 
             counter += 1
 
@@ -828,13 +900,32 @@ def keys_in_hand_after(grid, plan, keys_in_hand=0):
     return keys_in_hand
 
 
+def route_moves(route):
+    """
+    Movimientos de un camino guardado por explore(): los pasos
+    dentro de la región hasta pos, y luego last.
+    """
+
+    previous, pos, last = route
+
+    path = [last]
+
+    while previous[pos] is not None:
+        pos, name = previous[pos]
+        path.append(name)
+
+    path.reverse()
+
+    return path
+
+
 def rebuild_path(parents, state):
 
     pieces = []
 
     while parents[state] is not None:
-        state, path = parents[state]
-        pieces.append(path)
+        state, route = parents[state]
+        pieces.append(route_moves(route))
 
     pieces.reverse()
 

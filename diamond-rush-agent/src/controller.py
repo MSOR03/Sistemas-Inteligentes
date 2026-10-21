@@ -3,8 +3,16 @@ import time
 import numpy as np
 import pyautogui
 
+import config
 from level_reader import (
+    DIAMOND,
+    FLOOR,
+    HOLE,
+    PLAYER,
+    ROCK,
+    WALL,
     cell_features,
+    find_cells,
     view_cell
 )
 
@@ -21,19 +29,24 @@ DELTAS = {
     "right": (0, 1)
 }
 
+# Tiempos de los movimientos: se ajustan en .env (ver config.py).
+
 # Tiempo que se mantiene pulsada cada flecha.
-KEY_HOLD = 0.06
+KEY_HOLD = config.KEY_HOLD
 
 # Veces que se pulsa una flecha antes de dar el movimiento por fallido.
-MAX_PRESSES = 3
+MAX_PRESSES = config.MAX_PRESSES
 
 # Segundos que se espera a que el jugador cambie de casilla.
-MOVE_TIMEOUT = 1.0
+MOVE_TIMEOUT = config.MOVE_TIMEOUT
 
 # Segundos máximos esperando a que termine la animación.
-SETTLE_TIMEOUT = 1.0
+SETTLE_TIMEOUT = config.SETTLE_TIMEOUT
 
-POLL_INTERVAL = 0.03
+POLL_INTERVAL = config.POLL_INTERVAL
+
+# Tiempo sin cambios para dar una animación por terminada.
+STILL_TIME = config.STILL_TIME
 
 # Cambio mínimo (diferencia media de color en la miniatura)
 # para aceptar que el jugador salió de su casilla y entró en
@@ -99,8 +112,9 @@ def wait_for_move(
     lugar: hay que comparar cada casilla del nivel donde
     está ahora, no donde estaba.
 
-    Devuelve False si el tablero sigue igual: la tecla
-    se perdió o el movimiento no es posible.
+    Devuelve la captura en la que se vio el movimiento, o None
+    si el tablero sigue igual: la tecla se perdió o el
+    movimiento no es posible.
     """
 
     deadline = time.monotonic() + MOVE_TIMEOUT
@@ -121,21 +135,19 @@ def wait_for_move(
             and entered > LEFT_CELL_CHANGE
             and entered > ENTERED_CELL_RATIO * left
         ):
-            return True
+            return frame
 
-    return False
+    return None
 
 
-def wait_until_still(grab, cells, offset=(0, 0)):
+def wait_for_change(grab, before, origin, target, offset=(0, 0)):
     """
-    Espera a que las casillas dejen de cambiar, para no
-    pulsar la siguiente flecha en mitad de una animación
-    (empujar una roca o abrir una puerta tarda más que caminar).
+    Espera a que cambie la casilla del jugador o la de destino
+    (para el último paso, que entra en la salida). Devuelve
+    False si en MOVE_TIMEOUT no cambió nada: la tecla se perdió.
     """
 
-    deadline = time.monotonic() + SETTLE_TIMEOUT
-
-    previous = grab()
+    deadline = time.monotonic() + MOVE_TIMEOUT
 
     while time.monotonic() < deadline:
 
@@ -143,13 +155,54 @@ def wait_until_still(grab, cells, offset=(0, 0)):
 
         frame = grab()
 
-        if all(
-            cell_change(previous, frame, cell, offset) < STILL_CHANGE
+        if (
+            cell_change(before, frame, origin, offset) > LEFT_CELL_CHANGE
+            or cell_change(before, frame, target, offset) > LEFT_CELL_CHANGE
+        ):
+            return True
+
+    return False
+
+
+def wait_until_still(grab, cells, offset=(0, 0), previous=None):
+    """
+    Espera a que las casillas dejen de cambiar, para no
+    pulsar la siguiente flecha en mitad de una animación
+    (empujar una roca o abrir una puerta tarda más que caminar).
+
+    previous: una captura reciente para empezar a comparar (se
+    ahorra una captura). Devuelve la última captura, ya quieta.
+    """
+
+    deadline = time.monotonic() + SETTLE_TIMEOUT
+
+    if previous is None:
+        previous = grab()
+
+    # Se compara contra la última captura en la que algo cambió, no
+    # contra la anterior: así un movimiento lento, que cambia poco
+    # entre captura y captura, no pasa por quieto. Y tiene que estar
+    # así durante STILL_TIME, por rápido que se capture.
+    quiet_since = time.monotonic()
+
+    while time.monotonic() < deadline:
+
+        time.sleep(POLL_INTERVAL)
+
+        frame = grab()
+
+        if any(
+            cell_change(previous, frame, cell, offset) >= STILL_CHANGE
             for cell in cells
         ):
-            return
+            previous = frame
+            quiet_since = time.monotonic()
+            continue
 
-        previous = frame
+        if time.monotonic() - quiet_since >= STILL_TIME:
+            return frame
+
+    return grab()
 
 
 def inside(image, cell, offset=(0, 0)):
@@ -164,14 +217,137 @@ def inside(image, cell, offset=(0, 0)):
     )
 
 
+# Se apaga si un tramo con la flecha pulsada se queda corto: el
+# juego no sigue moviendo al jugador, y probar en cada tramo solo
+# haría perder tiempo. Vale para toda la sesión.
+_hold_works = True
+
+
+def walking_run(plan, index, pos, grid, rocks, holes, stop):
+    """
+    Cuántos movimientos desde plan[index] se pueden hacer
+    manteniendo la flecha pulsada; 0 si no conviene.
+
+    Solo un tramo recto por piso, diamantes o huecos ya
+    rellenados, sin rocas, y que termina contra un muro: si
+    la tecla se suelta un poco tarde, el jugador choca con el
+    muro y no pasa nada. Si terminara en piso, se pasaría a la
+    casilla siguiente, que el plan no tiene prevista.
+
+    rocks, holes: rocas y huecos sin rellenar en este momento.
+    stop: índice del plan donde termina la búsqueda del tramo.
+    """
+
+    move = plan[index]
+    dr, dc = DELTAS[move]
+
+    rows, cols = len(grid), len(grid[0])
+
+    def inside_board(cell):
+        return 0 <= cell[0] < rows and 0 <= cell[1] < cols
+
+    def walkable(cell):
+
+        if not inside_board(cell) or cell in rocks:
+            return False
+
+        symbol = grid[cell[0]][cell[1]]
+
+        if symbol == HOLE:
+            return cell not in holes
+
+        return symbol in (FLOOR, DIAMOND, PLAYER)
+
+    length = 0
+    cell = pos
+
+    while index + length < stop and plan[index + length] == move:
+
+        nxt = (cell[0] + dr, cell[1] + dc)
+
+        if not walkable(nxt):
+            return 0
+
+        length += 1
+        cell = nxt
+
+    if length < config.HOLD_MIN_RUN:
+        return 0
+
+    after = (cell[0] + dr, cell[1] + dc)
+
+    if inside_board(after) and grid[after[0]][after[1]] != WALL:
+        return 0
+
+    return length
+
+
+def hold_run(move, cells, grab):
+    """
+    Mantiene pulsada la flecha hasta que el jugador entra en la
+    última casilla del tramo, y luego cuenta en pantalla hasta
+    dónde llegó.
+
+    cells: casillas del tramo, sin la de partida.
+    Devuelve cuántas recorrió (puede ser menos si el juego no
+    mueve al jugador mientras la tecla sigue pulsada).
+    """
+
+    before = grab()
+
+    # Casillas del tramo en las que ya entró, y desde cuándo no
+    # avanza: si no entra en la siguiente en MOVE_TIMEOUT, se
+    # suelta la tecla (el juego no lo mueve, o algo lo bloquea).
+    entered = 0
+    progress_at = time.monotonic()
+
+    pyautogui.keyDown(move)
+
+    try:
+        while entered < len(cells):
+
+            time.sleep(POLL_INTERVAL)
+
+            frame = grab()
+
+            while (
+                entered < len(cells)
+                and cell_change(before, frame, cells[entered]) > LEFT_CELL_CHANGE
+            ):
+                entered += 1
+                progress_at = time.monotonic()
+
+            if time.monotonic() - progress_at > MOVE_TIMEOUT:
+                break
+    finally:
+        pyautogui.keyUp(move)
+
+    wait_until_still(grab, cells)
+
+    frame = grab()
+
+    # Las casillas de piso por las que pasó vuelven a verse como
+    # antes; las que siguen a donde se detuvo no cambiaron nunca.
+    # La última que cambió es donde está (o un diamante recogido
+    # antes de ella, que también es parte del recorrido).
+    reached = 0
+
+    for number, cell in enumerate(cells, 1):
+        if cell_change(before, frame, cell) > LEFT_CELL_CHANGE:
+            reached = number
+
+    return reached
+
+
 def execute_plan(
     plan,
     start,
     grab,
-    step_delay=0.05,
+    step_delay=config.STEP_DELAY,
     on_move=None,
     camera=None,
-    ends_in_exit=True
+    ends_in_exit=True,
+    grid=None
 ):
     """
     Envía los movimientos al juego con las flechas del teclado,
@@ -195,6 +371,8 @@ def execute_plan(
     para seguir a la cámara.
     ends_in_exit: el último paso entra en la salida y no se
     comprueba (al explorar sí hay que comprobarlo).
+    grid: tablero al empezar el plan. Con DR_HOLD_KEYS=1 permite
+    recorrer los tramos rectos manteniendo la flecha pulsada.
 
     La ventana del juego debe tener el foco.
     Mover el mouse a una esquina de la pantalla aborta
@@ -203,9 +381,79 @@ def execute_plan(
 
     pos = start
 
-    for index, move in enumerate(plan):
+    # Para mantener la flecha pulsada hay que saber cómo está el
+    # tablero en cada momento: dónde quedan las rocas empujadas y
+    # qué huecos se rellenaron.
+    global _hold_works
+
+    holding = (
+        config.HOLD_KEYS
+        and grid is not None
+        and camera is None
+    )
+
+    if holding:
+        rocks = set(find_cells(grid, ROCK))
+        holes = set(find_cells(grid, HOLE))
+
+    last = len(plan) - 1 if ends_in_exit else len(plan)
+
+    # Índice donde mantener la flecha no funcionó: ahí se pulsa.
+    no_hold = None
+
+    # Última captura con el juego quieto. Sirve como "antes" del
+    # siguiente movimiento y ahorra una captura por paso; se
+    # descarta cuando algo pudo cambiar la pantalla desde entonces.
+    still = None
+
+    index = 0
+
+    while index < len(plan):
+
+        move = plan[index]
 
         dr, dc = DELTAS[move]
+
+        run = 0
+
+        if holding and _hold_works and index != no_hold:
+            run = walking_run(plan, index, pos, grid, rocks, holes, last)
+
+        if run:
+
+            cells = [
+                (pos[0] + dr * step, pos[1] + dc * step)
+                for step in range(1, run + 1)
+            ]
+
+            still = None
+
+            reached = hold_run(move, cells, grab)
+
+            if reached < run:
+
+                _hold_works = False
+
+                print(
+                    f"Con la flecha pulsada el jugador avanzó {reached} "
+                    f"de {run} casillas: sigo con una pulsación por casilla."
+                )
+
+            if reached == 0:
+                no_hold = index
+                continue
+
+            pos = cells[reached - 1]
+            index += reached
+
+            time.sleep(step_delay)
+
+            # Ninguna casilla del tramo es una placa y detrás del
+            # último hay un muro, pero se avisa igual que siempre.
+            if on_move is not None and on_move(pos, (pos[0] + dr, pos[1] + dc)):
+                return index, "interrupted"
+
+            continue
 
         target = (pos[0] + dr, pos[1] + dc)
         beyond = (target[0] + dr, target[1] + dc)
@@ -213,42 +461,93 @@ def execute_plan(
         offset = camera.offset if camera is not None else (0, 0)
 
         if ends_in_exit and index == len(plan) - 1:
-            # El último paso entra en la salida y el nivel
-            # cambia: no queda tablero que comprobar.
-            press(move)
+            # El último paso entra en la salida y el nivel cambia:
+            # no se puede comprobar como los demás, pero sí que
+            # pasó algo. Si la pulsación se pierde, el nivel no
+            # termina y el agente lo daría por ganado.
+            before = still if still is not None else grab()
+
+            for _ in range(MAX_PRESSES):
+
+                press(move)
+
+                if wait_for_change(grab, before, pos, target, offset):
+                    break
+
             time.sleep(step_delay)
             return len(plan), "done"
 
-        before = grab()
+        before = still if still is not None else grab()
 
         for _ in range(MAX_PRESSES):
 
             press(move)
 
-            if wait_for_move(grab, before, pos, target, offset, camera):
+            moved = wait_for_move(grab, before, pos, target, offset, camera)
+
+            if moved is not None:
                 break
+
+            # Solo se vuelve a pulsar si la tecla se perdió: ni la
+            # casilla del jugador ni la de destino cambiaron. Si algo
+            # cambió sin ser el movimiento esperado, el jugador no
+            # está donde se cree; pulsar otra vez lo alejaría más.
+            # Mejor parar y volver a leer el tablero.
+            now = grab()
+
+            if (
+                cell_change(before, now, pos, offset) > LEFT_CELL_CHANGE
+                or cell_change(before, now, target, offset) > LEFT_CELL_CHANGE
+            ):
+                return index, "blocked"
 
         else:
             return index, "blocked"
 
-        wait_until_still(
+        still = wait_until_still(
             grab,
             [
                 cell
                 for cell in (pos, target, beyond)
                 if inside(before, cell, offset)
             ],
-            offset
+            offset,
+            moved
         )
 
         if camera is not None:
-            camera.update(grab())
+            camera.update(still)
+            still = None
 
         time.sleep(step_delay)
 
+        if holding and target in rocks:
+
+            # El movimiento empujó una roca: o quedó más allá, o
+            # cayó en un hueco y lo rellenó.
+            rocks.discard(target)
+
+            if beyond in holes:
+                holes.discard(beyond)
+            else:
+                rocks.add(beyond)
+
         pos = target
 
-        if on_move is not None and on_move(pos, beyond):
-            return index + 1, "interrupted"
+        index += 1
+
+        if on_move is not None:
+
+            started = time.perf_counter()
+
+            if on_move(pos, beyond):
+                return index, "interrupted"
+
+            # Si on_move hizo algo (pisó una placa y esperó a ver
+            # las rejas), la pantalla pudo cambiar: la captura
+            # guardada ya no vale. Si no hizo nada, vuelve al
+            # instante.
+            if time.perf_counter() - started > 0.005:
+                still = None
 
     return len(plan), "done"

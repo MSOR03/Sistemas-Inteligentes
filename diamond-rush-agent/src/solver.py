@@ -354,6 +354,16 @@ def search(
         for c in range(cols)
     }
 
+    # Casillas donde una roca podría quedar alguna vez (ver
+    # can_hold_rock): empujarla contra cualquier otra es inútil.
+    landing = {
+        (r, c)
+        for r in range(rows)
+        for c in range(cols)
+        if grid[r][c] in ROCK_LANDING + (DIAMOND, KEY, DOOR, GATE)
+        or (r, c) in spikes
+    }
+
     def passable(cell):
 
         return (
@@ -497,13 +507,7 @@ def search(
 
         pos, collected = state[0], state[1]
 
-        missing = [
-            cell
-            for cell, bit in diamonds.items()
-            if not collected & bit
-        ]
-
-        if not missing:
+        if collected == all_diamonds:
 
             if not goal:
                 return 0
@@ -515,6 +519,26 @@ def search(
                 )
 
             return manhattan(pos, goal)
+
+        # Con diamantes pendientes solo depende de la casilla y de
+        # los recogidos, que se repiten muchísimo entre estados.
+        estimate = diamond_estimates.get((pos, collected))
+
+        if estimate is None:
+            estimate = diamond_estimate(pos, collected)
+            diamond_estimates[(pos, collected)] = estimate
+
+        return estimate
+
+    diamond_estimates = {}
+
+    def diamond_estimate(pos, collected):
+
+        missing = [
+            cell
+            for cell, bit in diamonds.items()
+            if not collected & bit
+        ]
 
         # Empuja la búsqueda hacia estados con más diamantes
         # recogidos (solo en la búsqueda no óptima).
@@ -540,7 +564,7 @@ def search(
 
         return pos == goal
 
-    def can_hold_rock(cell, collected, taken, opened, used, rocks):
+    def can_hold_rock(cell, collected, taken, opened, used, rocks, pushed):
         # Una casilla ya vaciada (llave recogida,
         # puerta abierta) se comporta como piso.
         symbol = grid[cell[0]][cell[1]]
@@ -567,7 +591,7 @@ def search(
             # Por una reja abierta también pasa una roca. No
             # cuenta la roca que se está empujando: si era la
             # que pisaba la placa, la reja se cierra.
-            return gate_open(cell, rocks)
+            return gate_open(cell, rocks - {pushed})
 
         return False
 
@@ -618,7 +642,8 @@ def search(
                     taken,
                     opened,
                     used,
-                    rocks - {target}
+                    rocks,
+                    target
                 )
             ):
                 return None
@@ -688,7 +713,9 @@ def search(
         Recorre todas las casillas a las que el jugador llega
         caminando sin que cambie nada más en el nivel.
 
-        Devuelve (región, acciones). Cada acción es
+        Devuelve (casillas, acciones): casillas son las de la
+        región, cada una con el paso por el que se llegó (None si
+        se devolvió antes de recorrerla entera). Cada acción es
         (largo, camino, estado): el camino hasta el borde de
         la región más el paso que sí cambia el nivel (empujar
         una roca, abrir una puerta, gastar una trampa...).
@@ -701,6 +728,9 @@ def search(
         """
 
         rest = state[1:]
+        collected = state[1]
+        taken = state[2]
+        opened = state[4]
         rocks = state[6]
         filled = state[7]
 
@@ -723,7 +753,12 @@ def search(
             for name, dr, dc, target in neighbors[pos]:
 
                 if target in rocks:
-                    pass
+
+                    beyond = (target[0] + dr, target[1] + dc)
+
+                    # Contra un muro u otra roca no se mueve.
+                    if beyond not in landing or beyond in rocks:
+                        continue
 
                 elif target in holes:
 
@@ -741,7 +776,14 @@ def search(
 
                         continue
 
-                elif not leaving_spike and target in plain:
+                elif not leaving_spike and (
+                    target in plain
+                    # Diamantes recogidos, llaves tomadas y puertas
+                    # abiertas ya son piso: step() no cambiaría nada.
+                    or collected & diamonds.get(target, 0)
+                    or taken & keys.get(target, 0)
+                    or opened & doors.get(target, 0)
+                ):
 
                     if target not in previous:
                         previous[target] = (pos, name)
@@ -787,7 +829,7 @@ def search(
 
                 actions.append(action)
 
-        return min(previous), actions
+        return previous, actions
 
     def priority(state, new_cost):
 
@@ -803,6 +845,44 @@ def search(
     # Regiones ya expandidas (ver explore).
     closed = set()
 
+    # Casillas de las regiones expandidas, por estado del resto
+    # del nivel (solo en la búsqueda no óptima, ver region_key).
+    regions = {}
+
+    def region_key(state, region):
+
+        if missing_penalty:
+            return (region,) + state[1:]
+
+        # La búsqueda óptima distingue en qué casilla de la
+        # región quedó el jugador: de eso depende cuánto
+        # cuesta el siguiente tramo.
+        return state
+
+    def known_key(state):
+        """
+        La clave de state en closed sin llamar a explore, o None
+        si su región aún no se recorrió.
+
+        Desde cualquier casilla de una región se recorre la misma
+        región, salvo desde unas púas: al salir de ellas cambia
+        el nivel, así que forman una región aparte.
+        """
+
+        if not missing_penalty:
+            return state
+
+        pos = state[0]
+
+        if pos in spikes:
+            return None
+
+        for previous, region in regions.get(state[1:], ()):
+            if pos in previous:
+                return region_key(state, region)
+
+        return None
+
     counter = 0
     frontier = [
         (priority(start_state, 0), counter, start_state)
@@ -817,22 +897,28 @@ def search(
         if is_goal(state[0], state[1]):
             return rebuild_path(parents, state), False
 
-        region, actions = explore(state)
+        # Si la región del estado ya se expandió, se descarta sin
+        # volver a recorrerla: explore es lo más caro de la búsqueda.
+        if known_key(state) in closed:
+            continue
 
-        if region is not None:
+        previous, actions = explore(state)
 
-            if missing_penalty:
-                key = (region,) + state[1:]
-            else:
-                # La búsqueda óptima distingue en qué casilla
-                # de la región quedó el jugador: de eso depende
-                # cuánto cuesta el siguiente tramo.
-                key = state
+        if previous is not None:
+
+            region = min(previous)
+
+            key = region_key(state, region)
 
             if key in closed:
                 continue
 
             closed.add(key)
+
+            if missing_penalty:
+                regions.setdefault(state[1:], []).append(
+                    (previous, region)
+                )
 
         expansions += 1
 

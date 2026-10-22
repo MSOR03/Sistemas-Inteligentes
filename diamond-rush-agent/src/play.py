@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -76,6 +77,15 @@ LAST_MAP = (
 )
 
 
+# Área de juego de la última partida: se busca primero ahí aunque
+# el agente se vuelva a lanzar (ver load_game_area).
+LAST_GAME_AREA = (
+    PROJECT_ROOT
+    / "screenshots"
+    / "last_game_area.json"
+)
+
+
 # Segundos que tarda una reja en abrirse o cerrarse (ver config.py).
 GATE_ANIMATION = config.GATE_ANIMATION
 
@@ -83,6 +93,36 @@ GATE_ANIMATION = config.GATE_ANIMATION
 # Última área de juego encontrada: entre un nivel y otro el juego
 # no se mueve, así que se busca primero ahí.
 _last_game_area = None
+
+
+def load_game_area():
+    """
+    Área de juego guardada por la partida anterior, o None.
+
+    Con el juego a otra escala buscarlo en toda la pantalla
+    tarda más de un segundo; si sigue donde estaba, se encuentra
+    al instante. Si se movió, locate_game_area lo nota (el ancla
+    no aparece ahí) y lo busca en toda la pantalla.
+    """
+
+    try:
+        area = json.loads(LAST_GAME_AREA.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+    if not isinstance(area, dict) or not {"x", "y", "scale"} <= area.keys():
+        return None
+
+    return area
+
+
+def save_game_area(game_area):
+
+    try:
+        LAST_GAME_AREA.parent.mkdir(parents=True, exist_ok=True)
+        LAST_GAME_AREA.write_text(json.dumps(game_area), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def capture_game():
@@ -101,11 +141,17 @@ def capture_game():
 
     screen = capture_screen()
 
+    if _last_game_area is None:
+        _last_game_area = load_game_area()
+
     game_area = locate_game_area(
         screen,
         str(ANCHOR_TEMPLATE),
         hint=_last_game_area
     )
+
+    if game_area is not None:
+        save_game_area(game_area)
 
     _last_game_area = game_area
 
@@ -358,6 +404,10 @@ class LevelTimer:
         self.moves = 0
         self.replans = 0
 
+        # (hasta ver el movimiento, hasta que la imagen quedó
+        # quieta) de cada paso comprobado (ver execute_plan).
+        self.steps = []
+
     def think(self, seconds):
         self.thinking += seconds
 
@@ -383,6 +433,16 @@ class LevelTimer:
                 if self.moves else ")"
             )
         )
+        if self.steps:
+
+            moving = sum(step[0] for step in self.steps) / len(self.steps)
+            settling = sum(step[1] for step in self.steps) / len(self.steps)
+
+            print(
+                f"  Por paso:        {moving:7.2f} s hasta verlo moverse, "
+                f"{settling:.2f} s hasta que se queda quieto"
+            )
+
         print(f"  Replanificaciones: {self.replans}")
         print(f"  Total:           {self.total():7.2f} s")
 
@@ -537,7 +597,8 @@ def play(args):
             args.delay,
             watch_plates,
             camera=level_map,
-            grid=agent.grid
+            grid=agent.grid,
+            timings=timer.steps
         )
 
         timer.play(time.perf_counter() - playing_since, done)

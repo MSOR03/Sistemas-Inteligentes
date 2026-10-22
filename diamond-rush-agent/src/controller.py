@@ -347,7 +347,8 @@ def execute_plan(
     on_move=None,
     camera=None,
     ends_in_exit=True,
-    grid=None
+    grid=None,
+    timings=None
 ):
     """
     Envía los movimientos al juego con las flechas del teclado,
@@ -373,6 +374,9 @@ def execute_plan(
     comprueba (al explorar sí hay que comprobarlo).
     grid: tablero al empezar el plan. Con DR_HOLD_KEYS=1 permite
     recorrer los tramos rectos manteniendo la flecha pulsada.
+    timings: lista a la que se agrega, por cada paso comprobado,
+    (segundos hasta ver al jugador moverse, segundos hasta que
+    la imagen quedó quieta), para saber dónde se va el tiempo.
 
     La ventana del juego debe tener el foco.
     Mover el mouse a una esquina de la pantalla aborta
@@ -479,6 +483,8 @@ def execute_plan(
 
         before = still if still is not None else grab()
 
+        pressed_at = time.perf_counter()
+
         for _ in range(MAX_PRESSES):
 
             press(move)
@@ -504,6 +510,8 @@ def execute_plan(
         else:
             return index, "blocked"
 
+        moved_at = time.perf_counter()
+
         still = wait_until_still(
             grab,
             [
@@ -514,6 +522,12 @@ def execute_plan(
             offset,
             moved
         )
+
+        if timings is not None:
+            timings.append((
+                moved_at - pressed_at,
+                time.perf_counter() - moved_at
+            ))
 
         if camera is not None:
             camera.update(still)

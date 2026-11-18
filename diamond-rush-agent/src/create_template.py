@@ -2,6 +2,7 @@ import cv2
 import pyautogui
 import numpy as np
 import os
+from image_io import write_image
 
 
 def main():
@@ -33,7 +34,7 @@ def main():
         x:x+w
     ]
 
-    cv2.imwrite(
+    write_image(
         "../assets/templates/game_anchor.png",
         template
     )

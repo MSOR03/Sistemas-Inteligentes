@@ -22,3 +22,5 @@ diamond-rush-agent/**/__pycache__/
 diamond-rush-agent/**/*.pyc
 diamond-rush-agent/.pytest_cache/
 diamond-rush-agent/.vscode/
+# Ajustes locales del agente (ver diamond-rush-agent/.env.example)
+diamond-rush-agent/.env

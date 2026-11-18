@@ -18,6 +18,7 @@ from level_reader import (
     RAISED,
     FLOOR,
     UNKNOWN,
+    UNSEEN,
     find_cells
 )
 
@@ -61,7 +62,10 @@ MAX_LINK_OPTIONS = 60
 # Debajo de una roca puede haber púas que no se ven hasta
 # moverla. Por cautela se planifica como si cada casilla que
 # empieza con una roca fuera una trampa de un solo uso.
-CAUTIOUS_EXPANSIONS = 100_000
+# Si con cautela no sale pronto, casi nunca sale: en los niveles
+# guardados ningún plan cambia aun con 10 000, y con 100 000 se
+# perdían hasta 9 s (nivel 10 a medias) antes de rendirse.
+CAUTIOUS_EXPANSIONS = 30_000
 
 # Límite de expansiones (regiones, ver explore) antes de rendirse.
 MAX_EXPANSIONS = 400_000
@@ -75,6 +79,23 @@ FALLBACK_WEIGHT = 2
 # En esa segunda búsqueda, costo extra por diamante sin recoger.
 FALLBACK_MISSING_PENALTY = 5
 
+# También en esa búsqueda, sin diamantes pendientes, se tiene
+# en cuenta qué huecos hay que rellenar para llegar a la salida
+# (los del camino más barato desde el inicio, pasando por encima
+# de rocas y huecos) y lo lejos que está la roca más cercana de
+# cada uno. Con la distancia en línea recta, un nivel cuya
+# salida está encerrada tras huecos (nivel 20) no se resolvía:
+# acercar rocas a los huecos no acercaba la estimación a la meta.
+RELAXED_HOLE_COST = 8
+RELAXED_ROCK_COST = 2
+
+# Peso de cada casilla que le falta recorrer a una roca hasta su
+# hueco, y costo de un hueco al que ya no puede llegar ninguna.
+# Con 5 el nivel 20 sale en ~8 s (con 3, ~22 s) y el plan no
+# empeora (108 movimientos).
+HOLE_ROCK_WEIGHT = 5
+HOLE_WITHOUT_ROCK = 30
+
 
 MOVES = (
     ("up", -1, 0),
@@ -83,7 +104,7 @@ MOVES = (
     ("right", 0, 1)
 )
 
-BLOCKED = (WALL, LAVA, RAISED, UNKNOWN)
+BLOCKED = (WALL, LAVA, RAISED, UNKNOWN, UNSEEN)
 
 
 def manhattan(a, b):
@@ -127,10 +148,14 @@ def link_options(gates, plates, excluded=()):
     return options or [{}]
 
 
-def solve(grid, keys_in_hand=0, plates=(), excluded=()):
+def solve(grid, keys_in_hand=0, plates=(), excluded=(), budget=None):
     """
     Busca la secuencia de movimientos que recoge todos
     los diamantes y llega a la salida.
+
+    budget: tope de expansiones de cada búsqueda, para
+    consultas rápidas (al explorar) en las que rendirse
+    pronto es mejor que esperar.
 
     keys_in_hand: llaves que el jugador ya trae consigo
     (al replanificar a mitad de un nivel).
@@ -181,6 +206,9 @@ def solve(grid, keys_in_hand=0, plates=(), excluded=()):
         for hidden_spikes in (True, False)
     ]
 
+    def capped(expansions):
+        return expansions if budget is None else min(expansions, budget)
+
     for links, hidden_spikes in attempts:
 
         last = (links, hidden_spikes) == attempts[-1]
@@ -188,7 +216,7 @@ def solve(grid, keys_in_hand=0, plates=(), excluded=()):
         plan, exhausted = search(
             grid,
             1,
-            OPTIMAL_EXPANSIONS,
+            capped(OPTIMAL_EXPANSIONS),
             keys_in_hand,
             hidden_spikes=hidden_spikes,
             links=links
@@ -199,7 +227,7 @@ def solve(grid, keys_in_hand=0, plates=(), excluded=()):
             plan, _ = search(
                 grid,
                 FALLBACK_WEIGHT,
-                MAX_EXPANSIONS if last else CAUTIOUS_EXPANSIONS,
+                capped(MAX_EXPANSIONS if last else CAUTIOUS_EXPANSIONS),
                 keys_in_hand,
                 FALLBACK_MISSING_PENALTY,
                 hidden_spikes,
@@ -298,16 +326,219 @@ def search(
 
     all_diamonds = (1 << len(diamonds)) - 1
 
-    def heuristic(pos, collected):
+    # Casillas donde entrar no cambia nada del nivel (si no hay
+    # una roca encima): piso, placas y el inicio. explore()
+    # recorre estas sin pasar por step(), que es lo más caro de
+    # la búsqueda; el resultado es el mismo.
+    plain = {
+        (r, c)
+        for r in range(rows)
+        for c in range(cols)
+        if grid[r][c] in (FLOOR, PLAYER, PLATE)
+        and (r, c) not in spikes
+        and (r, c) != goal
+    }
+
+    # Vecinos de cada casilla a los que se puede intentar entrar:
+    # (movimiento, fila, columna, vecino). Los muros no cambian
+    # nunca, así que no vale la pena preguntarle a step().
+    neighbors = {
+        (r, c): [
+            (name, dr, dc, (r + dr, c + dc))
+            for name, dr, dc in MOVES
+            if 0 <= r + dr < rows
+            and 0 <= c + dc < cols
+            and grid[r + dr][c + dc] not in BLOCKED
+        ]
+        for r in range(rows)
+        for c in range(cols)
+    }
+
+    # Casillas donde una roca podría quedar alguna vez (ver
+    # can_hold_rock): empujarla contra cualquier otra es inútil.
+    landing = {
+        (r, c)
+        for r in range(rows)
+        for c in range(cols)
+        if grid[r][c] in ROCK_LANDING + (DIAMOND, KEY, DOOR, GATE)
+        or (r, c) in spikes
+    }
+
+    def passable(cell):
+
+        return (
+            0 <= cell[0] < rows
+            and 0 <= cell[1] < cols
+            and grid[cell[0]][cell[1]] not in BLOCKED
+        )
+
+    def holes_on_the_way():
+        """
+        Huecos del camino más barato del inicio a la salida si
+        se pudiera pasar por encima de todo (cruzar un hueco
+        cuesta conseguirle una roca; cruzar una roca, apartarla).
+        """
+
+        best = {start: 0}
+        came_from = {start: None}
+        queue = [(0, start)]
+
+        while queue:
+
+            distance, cell = heapq.heappop(queue)
+
+            if cell == goal:
+                break
+
+            if distance > best[cell]:
+                continue
+
+            for _, dr, dc in MOVES:
+
+                nxt = (cell[0] + dr, cell[1] + dc)
+
+                if not passable(nxt):
+                    continue
+
+                if nxt in start_rocks:
+                    extra = RELAXED_ROCK_COST
+                elif nxt in holes:
+                    extra = RELAXED_HOLE_COST
+                else:
+                    extra = 1
+
+                if distance + extra < best.get(nxt, float("inf")):
+                    best[nxt] = distance + extra
+                    came_from[nxt] = cell
+                    heapq.heappush(queue, (distance + extra, nxt))
+
+        if goal not in came_from:
+            return []
+
+        cells = []
+        cell = goal
+
+        while cell is not None:
+
+            if cell in holes:
+                cells.append(cell)
+
+            cell = came_from[cell]
+
+        return cells
+
+    def push_distances(hole):
+        """
+        Cuántos empujones necesita una roca desde cada casilla
+        para caer en hole, mirando solo muros (BFS hacia atrás).
+        La roca no puede pasar por otro hueco: caería en él.
+        """
+
+        distance = {hole: 0}
+        queue = deque([hole])
+
+        while queue:
+
+            cell = queue.popleft()
+
+            for _, dr, dc in MOVES:
+
+                # La roca llega a cell desde before, empujada
+                # por el jugador parado en behind.
+                before = (cell[0] - dr, cell[1] - dc)
+                behind = (before[0] - dr, before[1] - dc)
+
+                if (
+                    before in distance
+                    or before in holes
+                    or not passable(before)
+                    or not passable(behind)
+                ):
+                    continue
+
+                distance[before] = distance[cell] + 1
+                queue.append(before)
+
+        return distance
+
+    needed_holes = []
+
+    if missing_penalty and goal and holes:
+        needed_holes = [
+            (
+                hole,
+                sorted(
+                    push_distances(hole).items(),
+                    key=lambda item: (item[1], item[0])
+                )
+            )
+            for hole in holes_on_the_way()
+        ]
+
+    def holes_cost(rocks, filled):
+        """
+        Asigna a cada hueco pendiente del camino la roca libre
+        más cercana (de forma voraz) y suma esas distancias.
+        """
+
+        free = set(rocks)
+        total = 0
+
+        for hole, by_distance in needed_holes:
+
+            if filled & holes[hole]:
+                continue
+
+            # by_distance está ordenado: la primera roca libre
+            # es la más cercana.
+            for rock, steps in by_distance:
+
+                if rock in free:
+                    free.discard(rock)
+                    total += HOLE_ROCK_WEIGHT * steps
+                    break
+
+            else:
+                total += HOLE_WITHOUT_ROCK
+
+        return total
+
+    def heuristic(state):
+
+        pos, collected = state[0], state[1]
+
+        if collected == all_diamonds:
+
+            if not goal:
+                return 0
+
+            if needed_holes:
+                return (
+                    manhattan(pos, goal)
+                    + holes_cost(state[6], state[7])
+                )
+
+            return manhattan(pos, goal)
+
+        # Con diamantes pendientes solo depende de la casilla y de
+        # los recogidos, que se repiten muchísimo entre estados.
+        estimate = diamond_estimates.get((pos, collected))
+
+        if estimate is None:
+            estimate = diamond_estimate(pos, collected)
+            diamond_estimates[(pos, collected)] = estimate
+
+        return estimate
+
+    diamond_estimates = {}
+
+    def diamond_estimate(pos, collected):
 
         missing = [
             cell
             for cell, bit in diamonds.items()
             if not collected & bit
         ]
-
-        if not missing:
-            return manhattan(pos, goal) if goal else 0
 
         # Empuja la búsqueda hacia estados con más diamantes
         # recogidos (solo en la búsqueda no óptima).
@@ -333,7 +564,7 @@ def search(
 
         return pos == goal
 
-    def can_hold_rock(cell, collected, taken, opened, used, rocks):
+    def can_hold_rock(cell, collected, taken, opened, used, rocks, pushed):
         # Una casilla ya vaciada (llave recogida,
         # puerta abierta) se comporta como piso.
         symbol = grid[cell[0]][cell[1]]
@@ -360,7 +591,7 @@ def search(
             # Por una reja abierta también pasa una roca. No
             # cuenta la roca que se está empujando: si era la
             # que pisaba la placa, la reja se cierra.
-            return gate_open(cell, rocks)
+            return gate_open(cell, rocks - {pushed})
 
         return False
 
@@ -411,7 +642,8 @@ def search(
                     taken,
                     opened,
                     used,
-                    rocks - {target}
+                    rocks,
+                    target
                 )
             ):
                 return None
@@ -481,10 +713,14 @@ def search(
         Recorre todas las casillas a las que el jugador llega
         caminando sin que cambie nada más en el nivel.
 
-        Devuelve (región, acciones). Cada acción es
-        (movimientos, estado): el camino hasta el borde de
+        Devuelve (casillas, acciones): casillas son las de la
+        región, cada una con el paso por el que se llegó (None si
+        se devolvió antes de recorrerla entera). Cada acción es
+        (largo, camino, estado): el camino hasta el borde de
         la región más el paso que sí cambia el nivel (empujar
         una roca, abrir una puerta, gastar una trampa...).
+        El camino se guarda sin armar (ver route_moves): solo
+        hace falta escribirlo para el plan final.
 
         Buscar sobre estas acciones, y no paso a paso, es lo
         que permite resolver niveles largos: dos posiciones
@@ -492,29 +728,72 @@ def search(
         """
 
         rest = state[1:]
+        collected = state[1]
+        taken = state[2]
+        opened = state[4]
+        rocks = state[6]
+        filled = state[7]
 
         previous = {state[0]: None}
-        queue = deque([state])
+        depth = {state[0]: 0}
+        queue = deque([state[0]])
 
         actions = []
 
-        def path_to(pos, last):
-
-            path = [last]
-
-            while previous[pos] is not None:
-                pos, name = previous[pos]
-                path.append(name)
-
-            path.reverse()
-
-            return path
-
         while queue:
 
-            current = queue.popleft()
+            pos = queue.popleft()
 
-            for name, dr, dc in MOVES:
+            # Al salir de una trampa las púas suben: eso sí
+            # cambia el nivel y lo tiene que ver step().
+            leaving_spike = SPIKES_SINGLE_USE and pos in spikes
+
+            current = None
+
+            for name, dr, dc, target in neighbors[pos]:
+
+                if target in rocks:
+
+                    beyond = (target[0] + dr, target[1] + dc)
+
+                    # Contra un muro u otra roca no se mueve.
+                    if beyond not in landing or beyond in rocks:
+                        continue
+
+                elif target in holes:
+
+                    # Un hueco sin rellenar no se puede pisar; uno
+                    # rellenado es piso como cualquier otro.
+                    if not filled & holes[target]:
+                        continue
+
+                    if not leaving_spike:
+
+                        if target not in previous:
+                            previous[target] = (pos, name)
+                            depth[target] = depth[pos] + 1
+                            queue.append(target)
+
+                        continue
+
+                elif not leaving_spike and (
+                    target in plain
+                    # Diamantes recogidos, llaves tomadas y puertas
+                    # abiertas ya son piso: step() no cambiaría nada.
+                    or collected & diamonds.get(target, 0)
+                    or taken & keys.get(target, 0)
+                    or opened & doors.get(target, 0)
+                ):
+
+                    if target not in previous:
+                        previous[target] = (pos, name)
+                        depth[target] = depth[pos] + 1
+                        queue.append(target)
+
+                    continue
+
+                if current is None:
+                    current = (pos,) + rest
 
                 following = step(current, dr, dc)
 
@@ -526,12 +805,17 @@ def search(
                 if changed == rest and following[0] != goal:
 
                     if following[0] not in previous:
-                        previous[following[0]] = (current[0], name)
-                        queue.append(following)
+                        previous[following[0]] = (pos, name)
+                        depth[following[0]] = depth[pos] + 1
+                        queue.append(following[0])
 
                     continue
 
-                action = (path_to(current[0], name), following)
+                action = (
+                    depth[pos] + 1,
+                    (previous, pos, name),
+                    following
+                )
 
                 if (
                     missing_penalty
@@ -545,14 +829,11 @@ def search(
 
                 actions.append(action)
 
-        return min(previous), actions
+        return previous, actions
 
     def priority(state, new_cost):
 
-        return new_cost + weight * heuristic(
-            state[0],
-            state[1]
-        )
+        return new_cost + weight * heuristic(state)
 
     start_state = (
         start, 0, 0, keys_in_hand, 0, 0, start_rocks, 0
@@ -563,6 +844,44 @@ def search(
 
     # Regiones ya expandidas (ver explore).
     closed = set()
+
+    # Casillas de las regiones expandidas, por estado del resto
+    # del nivel (solo en la búsqueda no óptima, ver region_key).
+    regions = {}
+
+    def region_key(state, region):
+
+        if missing_penalty:
+            return (region,) + state[1:]
+
+        # La búsqueda óptima distingue en qué casilla de la
+        # región quedó el jugador: de eso depende cuánto
+        # cuesta el siguiente tramo.
+        return state
+
+    def known_key(state):
+        """
+        La clave de state en closed sin llamar a explore, o None
+        si su región aún no se recorrió.
+
+        Desde cualquier casilla de una región se recorre la misma
+        región, salvo desde unas púas: al salir de ellas cambia
+        el nivel, así que forman una región aparte.
+        """
+
+        if not missing_penalty:
+            return state
+
+        pos = state[0]
+
+        if pos in spikes:
+            return None
+
+        for previous, region in regions.get(state[1:], ()):
+            if pos in previous:
+                return region_key(state, region)
+
+        return None
 
     counter = 0
     frontier = [
@@ -578,37 +897,43 @@ def search(
         if is_goal(state[0], state[1]):
             return rebuild_path(parents, state), False
 
-        region, actions = explore(state)
+        # Si la región del estado ya se expandió, se descarta sin
+        # volver a recorrerla: explore es lo más caro de la búsqueda.
+        if known_key(state) in closed:
+            continue
 
-        if region is not None:
+        previous, actions = explore(state)
 
-            if missing_penalty:
-                key = (region,) + state[1:]
-            else:
-                # La búsqueda óptima distingue en qué casilla
-                # de la región quedó el jugador: de eso depende
-                # cuánto cuesta el siguiente tramo.
-                key = state
+        if previous is not None:
+
+            region = min(previous)
+
+            key = region_key(state, region)
 
             if key in closed:
                 continue
 
             closed.add(key)
 
+            if missing_penalty:
+                regions.setdefault(state[1:], []).append(
+                    (previous, region)
+                )
+
         expansions += 1
 
         if expansions > max_expansions:
             return None, False
 
-        for path, next_state in actions:
+        for length, route, next_state in actions:
 
-            new_cost = cost[state] + len(path)
+            new_cost = cost[state] + length
 
             if new_cost >= cost.get(next_state, float("inf")):
                 continue
 
             cost[next_state] = new_cost
-            parents[next_state] = (state, path)
+            parents[next_state] = (state, route)
 
             counter += 1
 
@@ -661,13 +986,32 @@ def keys_in_hand_after(grid, plan, keys_in_hand=0):
     return keys_in_hand
 
 
+def route_moves(route):
+    """
+    Movimientos de un camino guardado por explore(): los pasos
+    dentro de la región hasta pos, y luego last.
+    """
+
+    previous, pos, last = route
+
+    path = [last]
+
+    while previous[pos] is not None:
+        pos, name = previous[pos]
+        path.append(name)
+
+    path.reverse()
+
+    return path
+
+
 def rebuild_path(parents, state):
 
     pieces = []
 
     while parents[state] is not None:
-        state, path = parents[state]
-        pieces.append(path)
+        state, route = parents[state]
+        pieces.append(route_moves(route))
 
     pieces.reverse()
 

@@ -3,10 +3,9 @@ import csv
 from datetime import datetime
 from pathlib import Path
 
-import cv2
-
 from capture import capture_screen
 from game_detector import locate_game_area, crop_game
+from image_io import write_image
 
 
 # ----------------------------------------------------
@@ -125,7 +124,7 @@ def collect_level(level):
     )
 
     # Para conservar también la captura completa del juego
-    cv2.imwrite(
+    write_image(
         str(level_dir / "game_area.png"),
         game
     )
@@ -166,7 +165,7 @@ def collect_level(level):
                 / filename
             )
 
-            cv2.imwrite(
+            write_image(
                 str(output_path),
                 cell
             )
